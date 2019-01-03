@@ -45,6 +45,7 @@ class IncrementalLoader(td.Dataset):
         self.indexMapper = {}
         self.no_transformation = False
         self.transformLabels()
+        self.len = 1
 
     def transformLabels(self):
         '''Change labels to one hot coded vectors'''

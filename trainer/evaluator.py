@@ -57,7 +57,7 @@ class NearestMeanEvaluator():
             if self.cuda:
                 data, target = data.cuda(), target.cuda()
                 self.means = self.means.cuda()
-            data, target = Variable(data, volatile=True), Variable(target)
+            data, target = Variable(data), Variable(target)
             output = model(data, True).unsqueeze(1)
             result = (output.data - self.means.float())
 
@@ -99,7 +99,8 @@ class NearestMeanEvaluator():
             if self.cuda:
                 data, target = data.cuda(), target.cuda()
                 self.means = self.means.cuda()
-            data, target = Variable(data, volatile=True), Variable(target)
+            data, target = Variable(data), Variable(target)
+
             output = model(data, True).unsqueeze(1)
             result = (output.data - self.means.float())
 
@@ -185,14 +186,17 @@ class softmax_evaluator():
         '''
         model.eval()
         correct = 0
+
         if scale is not None:
             scale = np.copy(scale)
             scale = scale / np.max(scale)
             # print ("Gets here")
             scaleTemp = np.copy(scale)
+
             if thres:
                 for x in range(0, len(scale)):
                     temp = 0
+
                     for y in range(0, len(scale)):
                         if x == y:
                             pass
@@ -208,10 +212,13 @@ class softmax_evaluator():
             if self.cuda:
                 scale = scale.cuda()
         tempCounter = 0
+
         for data, y, target in loader:
+
             if self.cuda:
                 data, target = data.cuda(), target.cuda()
-            data, target = Variable(data, volatile=True), Variable(target)
+            data, target = Variable(data), Variable(target)
+
             if thres:
                 output = model(data)
                 output = output * Variable(scale.float())
@@ -220,14 +227,18 @@ class softmax_evaluator():
                 output = model(data, scale=Variable(scale.float()))
             else:
                 output = model(data)
+
             if descriptor:
                 # To compare with FB paper
                 # output = output/Variable(scale.float())
                 outputTemp = output.data.cpu().numpy()
                 targetTemp = target.data.cpu().numpy()
+
                 if falseDec:
+
                     for a in range(0, len(targetTemp)):
                         random = np.random.choice(len(older_classes) + step_size, step_size, replace=False).tolist()
+
                         if targetTemp[a] in random:
                             pass
                         else:
@@ -238,12 +249,14 @@ class softmax_evaluator():
                     for a in range(0, len(targetTemp)):
                         outputTemp[a, int(float(targetTemp[a]) / step_size) * step_size:(int(
                             float(targetTemp[a]) / step_size) * step_size) + step_size] += 20
+
                 if tempCounter == 0:
                     print(int(float(targetTemp[a]) / step_size) * step_size,
                           (int(float(targetTemp[a]) / step_size) * step_size) + step_size)
                     tempCounter += 1
 
                 output = torch.from_numpy(outputTemp)
+
                 if self.cuda:
                     output = output.cuda()
                 output = Variable(output)
@@ -268,14 +281,17 @@ class softmax_evaluator():
             scale = scale / np.max(scale)
             scale = 1 / scale
             scale = torch.from_numpy(scale).unsqueeze(0)
+
             if self.cuda:
                 scale = scale.cuda()
 
         # Iterate over the data and stores the results in the confusion matrix
         for data, y, target in loader:
+
             if self.cuda:
                 data, target = data.cuda(), target.cuda()
-            data, target = Variable(data, volatile=True), Variable(target)
+            data, target = Variable(data), Variable(target)
+
             if scale is not None:
                 output = model(data, scale=Variable(scale.float()))
             else:
@@ -285,15 +301,18 @@ class softmax_evaluator():
                 # To compare with FB paper
                 outputTemp = output.data.cpu().numpy()
                 targetTemp = target.data.cpu().numpy()
+
                 for a in range(0, len(targetTemp)):
                     outputTemp[a, int(float(targetTemp[a]) / step_size) * step_size:(int(
                         float(targetTemp[a]) / step_size) * step_size) + step_size] += 20
+
                 output = torch.from_numpy(outputTemp)
+
                 if self.cuda:
                     output = output.cuda()
                 output = Variable(output)
 
-            test_loss += F.nll_loss(output, target, size_average=False).data[0]  # sum up batch loss
+            test_loss += F.nll_loss(output, target, size_average=False).data.item()  # sum up batch loss
             pred = output.data.max(1, keepdim=True)[1]  # get the index of the max log-probability
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
             cMatrix.add(pred.squeeze(), target.data.view_as(pred).squeeze())

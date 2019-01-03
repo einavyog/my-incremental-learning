@@ -17,6 +17,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from tqdm import tqdm
 import model
+from  torch.autograd import backward
+from torch.autograd.gradcheck import zero_gradients
 
 logger = logging.getLogger('iCARL')
 
@@ -37,8 +39,10 @@ class GenericTrainer:
         self.optimizer = optimizer
         self.model_fixed = copy.deepcopy(self.model)
         self.active_classes = []
+
         for param in self.model_fixed.parameters():
             param.requires_grad = False
+
         self.models = []
         self.current_lr = args.lr
         self.all_classes = list(range(dataset.classes))
@@ -73,18 +77,22 @@ class AutoEncoderTrainer(GenericTrainer):
 
             def forward(self, x, feature=False):
                 x = F.sigmoid(self.fc1(x))
+
                 if feature:
                     return x
                 return self.fc2(x)
 
         myEncoder = AutoEncoderModelClass(noOfFeatures)
+
         if self.args.cuda:
             myEncoder.cuda()
         return myEncoder
 
     def train_auto_encoder(self, xIterator, epochs):
         bar = progressbar.ProgressBar()
+
         for epoch in range(epochs):
+
             for batch_idx, (data, target) in bar(enumerate(self.train_data_iterator)):
                 pass
 
@@ -93,14 +101,18 @@ class AutoEncoderTrainer(GenericTrainer):
 
 
 class Trainer(GenericTrainer):
+
     def __init__(self, trainDataIterator, testDataIterator, dataset, model, args, optimizer, ideal_iterator=None):
         super().__init__(trainDataIterator, testDataIterator, dataset, model, args, optimizer, ideal_iterator)
         self.threshold = np.ones(self.dataset.classes, dtype=np.float64)
         self.threshold2 = np.ones(self.dataset.classes, dtype=np.float64)
 
     def update_lr(self, epoch):
+
         for temp in range(0, len(self.args.schedule)):
+
             if self.args.schedule[temp] == epoch:
+
                 for param_group in self.optimizer.param_groups:
                     self.current_lr = param_group['lr']
                     param_group['lr'] = self.current_lr * self.args.gammas[temp]
@@ -139,10 +151,12 @@ class Trainer(GenericTrainer):
             self.test_data_iterator.dataset.limit_class(pop_val, 0)
 
     def limit_class(self, n, k, herding=True):
+
         if not herding:
             self.train_loader.limit_class(n, k)
         else:
             self.train_loader.limit_class_and_sort(n, k, self.model_fixed)
+
         if n not in self.older_classes:
             self.older_classes.append(n)
 
@@ -186,8 +200,10 @@ class Trainer(GenericTrainer):
         if self.args.random_init:
             logger.warning("Random Initilization of weights at each increment")
             myModel = model.ModelFactory.get_model(self.args.model_type, self.args.dataset)
+
             if self.args.cuda:
                 myModel.cuda()
+
             self.model = myModel
             self.optimizer = torch.optim.SGD(self.model.parameters(), self.args.lr, momentum=self.args.momentum,
                                              weight_decay=self.args.decay, nesterov=True)
@@ -205,8 +221,10 @@ class Trainer(GenericTrainer):
 
     def getModel(self):
         myModel = model.ModelFactory.get_model(self.args.model_type, self.args.dataset)
+
         if self.args.cuda:
             myModel.cuda()
+
         optimizer = torch.optim.SGD(myModel.parameters(), self.args.lr, momentum=self.args.momentum,
                                     weight_decay=self.args.decay, nesterov=True)
         myModel.eval()
@@ -216,15 +234,52 @@ class Trainer(GenericTrainer):
         self.model_single = myModel
         self.optimizer_single = optimizer
 
-    def train(self, epoch):
+
+    ################ Function for Jacobian calculation ################
+    def compute_jacobian(self, data, use_fixed_model=True):
+
+        inputs = Variable(data, requires_grad=True)
+
+        output = self.model_fixed.forward(inputs)
+
+        num_classes = output.size()[1]
+
+        # jacobian = torch.zeros(10, *inputs.size())
+        jacobian_list = []
+        grad_output = torch.zeros(*output.size())
+
+        if inputs.is_cuda:
+            grad_output = grad_output.cuda()
+
+        for i in range(num_classes):
+            # for i in range(2):
+            zero_gradients(inputs)
+
+            grad_output_curr = grad_output.clone()
+            grad_output_curr[:, i] = 1
+            jacobian_list.append(torch.autograd.grad(outputs=output,
+                                                     inputs=inputs,
+                                                     grad_outputs=grad_output_curr,
+                                                     only_inputs=True,
+                                                     retain_graph=True,
+                                                     create_graph=not use_fixed_model)[0])
+
+        jacobian = torch.stack(jacobian_list, dim=0)
+
+        return jacobian
+
+    def train(self, epoch, is_jacobian_matching=True):
 
         self.model.train()
         logger.info("Epoch %d", epoch)
+
         for data, y, target in tqdm(self.train_data_iterator):
             if self.args.cuda:
                 data, target = data.cuda(), target.cuda()
                 y = y.cuda()
+
             oldClassesIndices = (target * 0).int()
+
             for elem in range(0, self.args.unstructured_size):
                 oldClassesIndices = oldClassesIndices + (target == elem).int()
 
@@ -240,6 +295,7 @@ class Trainer(GenericTrainer):
             data_distillation_loss = data
 
             y_onehot = torch.FloatTensor(len(target_normal_loss), self.dataset.classes)
+
             if self.args.cuda:
                 y_onehot = y_onehot.cuda()
 
@@ -259,18 +315,28 @@ class Trainer(GenericTrainer):
             elif len(self.older_classes) > 0:
                 # Get softened labels of the model from a previous version of the model.
                 pred2 = self.model_fixed(Variable(data_distillation_loss), T=myT, labels=True).data
-                # Softened output of the model
-                if myT > 1:
-                    output2 = self.model(Variable(data_distillation_loss), T=myT)
+
+                if not is_jacobian_matching:
+                    # Softened output of the model
+                    if myT > 1:
+                        output2 = self.model(Variable(data_distillation_loss), T=myT)
+                    else:
+                        output2 = output
+                        pred2 = pred2[new_classes_indices, :] #My addition due to fail (Einav)
+
+                    self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
+                    loss2 = F.kl_div(output2, Variable(pred2))
+                    loss2.backward(retain_graph=True)
+
                 else:
-                    output2 = output
+                    self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha #TODO: Change cpu threshold for loss3 Einav
 
+                    jacobian = self.compute_jacobian(data, use_fixed_model=False)
+                    jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True)
 
-                self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (
-                    myT * myT) * self.args.alpha
-                loss2 = F.kl_div(output2, Variable(pred2))
-
-                loss2.backward(retain_graph=True)
+                    print(jacobian.is_leaf)
+                    loss3 = (jacobian-jacobian_model_fixed).norm()
+                    loss3.backward(retain_graph=True)
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
                 for param in self.model.parameters():
@@ -293,13 +359,12 @@ class Trainer(GenericTrainer):
         else:
             self.threshold[0:self.args.unstructured_size] = np.max(self.threshold)
             self.threshold2[0:self.args.unstructured_size] = np.max(self.threshold2)
-
-            self.threshold[self.args.unstructured_size + len(
-                self.older_classes) + self.args.step_size: len(self.threshold)] = np.max(
-                self.threshold)
-            self.threshold2[self.args.unstructured_size + len(
-                self.older_classes) + self.args.step_size: len(self.threshold2)] = np.max(
-                self.threshold2)
+            self.threshold[self.args.unstructured_size +
+                           len(self.older_classes) +
+                           self.args.step_size: len(self.threshold)] = np.max(self.threshold)
+            self.threshold2[self.args.unstructured_size +
+                            len(self.older_classes) +
+                            self.args.step_size: len(self.threshold2)] = np.max(self.threshold2)
 
     def addModel(self):
         model = copy.deepcopy(self.model_single)
@@ -312,7 +377,9 @@ class Trainer(GenericTrainer):
     def trainSingle(self, epoch, classGroup):
 
         for temp in range(0, len(self.args.schedule)):
+
             if self.args.schedule[temp] == epoch:
+
                 for param_group in self.optimizer_single.param_groups:
                     self.current_lr = param_group['lr']
                     param_group['lr'] = self.current_lr * self.args.gammas[temp]
@@ -323,11 +390,13 @@ class Trainer(GenericTrainer):
         self.model_single.train()
 
         for batch_idx, (data, y, target) in enumerate(self.train_data_iterator):
+
             if self.args.cuda:
                 data, target = data.cuda(), target.cuda()
                 y = y.cuda()
 
             oldClassesIndices = (target * 0).int()
+
             for elem in range(0, self.args.unstructured_size + classGroup):
                 oldClassesIndices = oldClassesIndices + (target == elem).int()
 
@@ -351,7 +420,9 @@ class Trainer(GenericTrainer):
     def storeDistillation(self, epoch, classGroup):
 
         self.train_data_iterator.dataset.getIndexElem(True)
+
         for batch_idx, (data, y, target) in enumerate(self.train_data_iterator):
+
             if self.args.cuda:
                 data, target = data.cuda(), target.cuda()
                 y = y.cuda()

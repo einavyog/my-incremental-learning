@@ -21,6 +21,11 @@ import trainer
 
 import utils.Colorer
 
+import os
+from subprocess import check_output
+
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
+
 from subprocess import check_output
 
 logger = logging.getLogger('iCARL')
@@ -68,7 +73,7 @@ parser.add_argument('--decay', type=float, default=0.00005, help='Weight decay (
 parser.add_argument('--alpha-increment', type=float, default=1.0, help='Weight decay (L2 penalty).')
 parser.add_argument('--step-size', type=int, default=10, help='How many classes to add in each increment')
 parser.add_argument('--T', type=float, default=1, help='Tempreture used for softening the targets')
-parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000],
+parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000, 2001],
                     help='How many images can we store at max. 0 will result in fine-tuning')
 parser.add_argument('--epochs-class', type=int, default=70, help='Number of epochs for each increment')
 parser.add_argument('--dataset', default="CIFAR100", help='Dataset to be used; example CIFAR, MNIST')
@@ -84,6 +89,7 @@ parser.add_argument('--adversarial', action='store_true', default=False,
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
+
 IS_RUN_LOCAL = False
 ips = check_output(['hostname', '--all-ip-addresses'])
 if ips == b'132.66.50.93 \n':
@@ -123,7 +129,8 @@ for seed in args.seeds:
             train_dataset_loader = dataHandler.IncrementalLoader(dataset.train_data.train_data,
                                                                  dataset.train_data.train_labels,
                                                                  dataset.labels_per_class_train,
-                                                                 dataset.classes, [], transform=dataset.train_transform,
+                                                                 dataset.classes, [],
+                                                                 transform=dataset.train_transform,
                                                                  cuda=args.cuda, oversampling=not args.upsampling,
                                                                  )
             # Special loader use to compute ideal NMC; i.e, NMC that using all the data points to compute the mean embedding
@@ -137,8 +144,9 @@ for seed in args.seeds:
             # Loader for test data.
             test_dataset_loader = dataHandler.IncrementalLoader(dataset.test_data.test_data,
                                                                 dataset.test_data.test_labels,
-                                                                dataset.labels_per_class_test, dataset.classes,
-                                                                [], transform=dataset.test_transform, cuda=args.cuda,
+                                                                dataset.labels_per_class_test,
+                                                                dataset.classes, [],
+                                                                transform=dataset.test_transform, cuda=args.cuda,
                                                                 )
 
             kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
@@ -146,7 +154,7 @@ for seed in args.seeds:
             # Iterator to iterate over training data.
             train_iterator = torch.utils.data.DataLoader(train_dataset_loader,
                                                          batch_size=args.batch_size, shuffle=True, **kwargs)
-            # Iterator to iterate over all training data (Equivalent to memory-budget = infitie
+            # Iterator to iterate over all training data (Equivalent to memory-budget = infitie)
             train_iterator_nmc = torch.utils.data.DataLoader(train_dataset_loader_nmc,
                                                              batch_size=args.batch_size, shuffle=True, **kwargs)
             # Iterator to iterate over test data
@@ -201,7 +209,7 @@ for seed in args.seeds:
             y = []
             y1 = []
             train_y = []
-            higher_y = []
+            # higher_y = []
             y_scaled = []
             y_grad_scaled = []
             nmc_ideal_cum = []
@@ -222,7 +230,10 @@ for seed in args.seeds:
                 # Running epochs_class epochs
                 for epoch in range(0, args.epochs_class):
                     my_trainer.update_lr(epoch)
-                    my_trainer.train(epoch)
+                    if m == 2000:
+                        my_trainer.train(epoch, is_jacobian_matching=False)
+                    else:
+                        my_trainer.train(epoch, is_jacobian_matching=True)
                     # print(my_trainer.threshold)
                     if epoch % args.log_interval == (args.log_interval - 1):
                         tError = t_classifier.evaluate(my_trainer.model, train_iterator)
@@ -230,30 +241,32 @@ for seed in args.seeds:
                         logger.debug("Train Classifier: %0.2f", tError)
                         logger.debug("Test Classifier: %0.2f", t_classifier.evaluate(my_trainer.model, test_iterator))
                         logger.debug("Test Classifier Scaled: %0.2f",
-                              t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
-                                                    my_trainer.older_classes, args.step_size))
+                                     t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
+                                                           my_trainer.older_classes, args.step_size))
                         logger.info("Test Classifier Grad Scaled: %0.2f",
-                              t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
-                                                    my_trainer.older_classes, args.step_size))
+                                    t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
+                                                          my_trainer.older_classes, args.step_size))
 
                 # Evaluate the learned classifier
                 img = None
 
                 logger.info("Test Classifier Final: %0.2f", t_classifier.evaluate(my_trainer.model, test_iterator))
                 logger.info("Test Classifier Final Scaled: %0.2f",
-                      t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
-                                            my_trainer.older_classes, args.step_size))
+                            t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
+                                                  my_trainer.older_classes, args.step_size))
                 logger.info("Test Classifier Final Grad Scaled: %0.2f",
-                      t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
-                                            my_trainer.older_classes, args.step_size))
+                            t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
+                                                  my_trainer.older_classes, args.step_size))
 
-                higher_y.append(t_classifier.evaluate(my_trainer.model, test_iterator, higher=True))
+                # higher_y.append(t_classifier.evaluate(my_trainer.model, test_iterator, higher=True))
 
                 y_grad_scaled.append(
                     t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
                                           my_trainer.older_classes, args.step_size))
-                y_scaled.append(t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
-                                                      my_trainer.older_classes, args.step_size))
+                y_scaled.append(
+                    t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
+                                          my_trainer.older_classes, args.step_size))
+
                 y1.append(t_classifier.evaluate(my_trainer.model, test_iterator))
 
                 # Update means using the train iterator; this is iCaRL case
@@ -288,7 +301,6 @@ for seed in args.seeds:
                                                                             my_trainer.older_classes,
                                                                             args.step_size, True)
 
-
                 my_trainer.setup_training()
 
                 # Store the resutls in the my_experiment object; this object should contain all the information required to reproduce the results.
@@ -307,21 +319,21 @@ for seed in args.seeds:
 
                 # Plotting the confusion matrices
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
-                                      my_experiment.path + "tcMatrix", tcMatrix)
+                                      my_experiment.path + "_tc_matrix", tcMatrix)
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
-                                      my_experiment.path + "tcMatrix_scaled", tcMatrix_scaled)
+                                      my_experiment.path + "_tc_matrix_scaled", tcMatrix_scaled)
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
-                                      my_experiment.path + "tcMatrix_scaled_binning", tcMatrix_scaled_binning)
+                                      my_experiment.path + "_tc_matrix_scaled_binning", tcMatrix_scaled_binning)
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
-                                      my_experiment.path + "nmcMatrix",
+                                      my_experiment.path + "_nmc_matrix",
                                       nmcMatrix)
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
-                                      my_experiment.path + "nmcMatrixIdeal",
+                                      my_experiment.path + "_nmc_matrix_ideal",
                                       nmcMatrixIdeal)
 
                 # Plotting the line diagrams of all the possible cases
                 my_plotter.plot(x, y, title=args.name, legend="NMC")
-                my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
+                # my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
                 my_plotter.plot(x, y_scaled, title=args.name, legend="Trained Classifier Scaled")
                 my_plotter.plot(x, y_grad_scaled, title=args.name, legend="Trained Classifier Grad Scaled")
                 my_plotter.plot(x, nmc_ideal_cum, title=args.name, legend="Ideal NMC")
