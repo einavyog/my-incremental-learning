@@ -334,7 +334,6 @@ class Trainer(GenericTrainer):
                     jacobian = self.compute_jacobian(data, use_fixed_model=False)
                     jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True)
 
-                    print(jacobian.is_leaf)
                     loss3 = (jacobian-jacobian_model_fixed).norm()
                     loss3.backward(retain_graph=True)
 

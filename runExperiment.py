@@ -12,6 +12,7 @@ import logging
 
 import torch
 import torch.utils.data as td
+import sys
 
 import dataHandler
 import experiment as ex
@@ -24,7 +25,15 @@ import utils.Colorer
 import os
 from subprocess import check_output
 
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+# os.environ["CUDA_VISIBLE_DEVICES"]="2"
+sys.version
+
+print("PyTorch version: ")
+print(torch.__version__)
+print("CUDA Version: ")
+print(torch.version.cuda)
+print("cuDNN version is: ")
+print(torch.backends.cudnn.version())
 
 from subprocess import check_output
 
@@ -51,13 +60,13 @@ parser.add_argument('--no-random', action='store_true', default=False,
                     help='Disable random shuffling of classes')
 parser.add_argument('--no-herding', action='store_true', default=False,
                     help='Disable herding for NMC')
-parser.add_argument('--seeds', type=int, nargs='+', default=[23423],
+parser.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3, 4, 5],
                     help='Seeds values to be used')
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--model-type', default="resnet32",
                     help='model type to be used. Example : resnet32, resnet20, densenet, test')
-parser.add_argument('--name', default="noname",
+parser.add_argument('--name', default=None,
                     help='Name of the experiment')
 parser.add_argument('--outputDir', default="../",
                     help='Directory to store the results; a new folder "DDMMYYYY" will be created '
@@ -71,12 +80,12 @@ parser.add_argument('--alphas', type=float, nargs='+', default=[1.0],
                     help='Weight given to new classes vs old classes in loss')
 parser.add_argument('--decay', type=float, default=0.00005, help='Weight decay (L2 penalty).')
 parser.add_argument('--alpha-increment', type=float, default=1.0, help='Weight decay (L2 penalty).')
-parser.add_argument('--step-size', type=int, default=10, help='How many classes to add in each increment')
+parser.add_argument('--step-size', type=int, default=2, help='How many classes to add in each increment')
 parser.add_argument('--T', type=float, default=1, help='Tempreture used for softening the targets')
-parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000, 2001],
+parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000],
                     help='How many images can we store at max. 0 will result in fine-tuning')
-parser.add_argument('--epochs-class', type=int, default=70, help='Number of epochs for each increment')
-parser.add_argument('--dataset', default="CIFAR100", help='Dataset to be used; example CIFAR, MNIST')
+parser.add_argument('--epochs-class', type=int, default=25, help='Number of epochs for each increment')
+parser.add_argument('--dataset', default="MNIST", help='Dataset to be used; example CIFAR100, CIFAR10, MNIST')
 parser.add_argument('--lwf', action='store_true', default=False,
                     help='Use learning without forgetting. Ignores memory-budget '
                          '("Learning with Forgetting," Zhizhong Li, Derek Hoiem)')
@@ -86,6 +95,7 @@ parser.add_argument('--rand', action='store_true', default=False,
                     help='Replace exemplars with random noice instances')
 parser.add_argument('--adversarial', action='store_true', default=False,
                     help='Replace exemplars with adversarial instances')
+parser.add_argument('--jacobian_matching', action='store_true')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -98,7 +108,7 @@ if ips == b'132.66.50.93 \n':
 
 args.is_run_local = IS_RUN_LOCAL
 if IS_RUN_LOCAL:
-    args.outputDir = '/home/einavyogev/Documents/incremental-learning/results'
+    args.outputDir = './results/'
 
 dataset = dataHandler.DatasetFactory.get_dataset(args.dataset)
 
@@ -106,6 +116,14 @@ dataset = dataHandler.DatasetFactory.get_dataset(args.dataset)
 if args.step_size < 2:
     print("Step size of 1 will result in no learning;")
     assert False
+
+# Plotting the line diagrams of all the possible cases
+y_total = []
+y_scaled_total = []
+y_grad_scaled_total = []
+nmc_ideal_cum_total = []
+y1_total = []
+train_y_total = []
 
 # Run an experiment corresponding to every seed value
 for seed in args.seeds:
@@ -118,6 +136,10 @@ for seed in args.seeds:
             # In LwF, memory_budget is 0 (See the paper "Learning without Forgetting" for details).
             if args.lwf:
                 args.memory_budget = 0
+
+            experiment_name = args.dataset + '_' + str(args.epochs_class) + \
+                              'epochs_' + str(args.lr).replace('.', 'p') + \
+                              'lr_' + str(seed) + '_jacobian_matching_' + str(args.jacobian_matching)
 
             # Fix the seed.
             args.seed = seed
@@ -168,7 +190,7 @@ for seed in args.seeds:
                 myModel.cuda()
 
             # Define an experiment.
-            my_experiment = ex.experiment(args.name, args, output_dir=args.outputDir)
+            my_experiment = ex.experiment(experiment_name, args, output_dir=args.outputDir)
 
             # Adding support for logging. A .log is generated with all the logs. Logs are also stored in a temp file one directory
             # before the code repository
@@ -205,14 +227,7 @@ for seed in args.seeds:
                                          train_iterator_nmc)
 
             # Parameters for storing the results
-            x = []
-            y = []
-            y1 = []
-            train_y = []
-            # higher_y = []
-            y_scaled = []
-            y_grad_scaled = []
-            nmc_ideal_cum = []
+            x, y, y1, train_y, y_scaled, y_grad_scaled, nmc_ideal_cum = ([] for i in range(7))
 
             # Initilize the evaluators used to measure the performance of the system.
             nmc = trainer.EvaluatorFactory.get_evaluator("nmc", args.cuda)
@@ -230,10 +245,8 @@ for seed in args.seeds:
                 # Running epochs_class epochs
                 for epoch in range(0, args.epochs_class):
                     my_trainer.update_lr(epoch)
-                    if m == 2000:
-                        my_trainer.train(epoch, is_jacobian_matching=False)
-                    else:
-                        my_trainer.train(epoch, is_jacobian_matching=True)
+                    my_trainer.train(epoch, is_jacobian_matching=args.jacobian_matching)
+
                     # print(my_trainer.threshold)
                     if epoch % args.log_interval == (args.log_interval - 1):
                         tError = t_classifier.evaluate(my_trainer.model, train_iterator)
@@ -342,3 +355,54 @@ for seed in args.seeds:
 
                 # Saving the line plot
                 my_plotter.save_fig(my_experiment.path, dataset.classes + 1)
+
+            y_total.append(y)
+            y_scaled_total.append(y_scaled)
+            y_grad_scaled_total.append(y_grad_scaled)
+            nmc_ideal_cum_total.append(nmc_ideal_cum)
+            y1_total.append(y1)
+            train_y_total.append(train_y)
+
+#Plot avarage over all runs:
+ncols = len(y_total[0])
+nrows = len(y_total)
+
+y_total_avg = ncols*[0]
+y_scaled_total_avg = ncols*[0]
+y_grad_scaled_total_avg = ncols*[0]
+nmc_ideal_cum_total_avg = ncols*[0]
+y1_total_avg = ncols*[0]
+train_y_total_avg = ncols*[0]
+
+nelem = float(nrows)
+col = 0
+for col in range(ncols):
+    for row in range(nrows):
+        y_total_avg[col] += y_total[row][col]
+        y_scaled_total_avg[col] += y_scaled_total[row][col]
+        y_grad_scaled_total_avg[col] += y_grad_scaled_total[row][col]
+        nmc_ideal_cum_total_avg[col] += nmc_ideal_cum_total[row][col]
+        y1_total_avg[col] += y1_total[row][col]
+        train_y_total_avg[col] += train_y_total[row][col]
+
+    y_total_avg[col] /= nelem
+    y_scaled_total_avg[col] /= nelem
+    y_grad_scaled_total_avg[col] /= nelem
+    nmc_ideal_cum_total_avg[col] /= nelem
+    y1_total_avg[col] /= nelem
+    train_y_total_avg[col] /= nelem
+
+my_plotter_total = plt.Plotter()
+
+# Plotting the line diagrams of all the possible cases
+my_plotter_total.plot(x, y_total_avg, title=args.name, legend="NMC")
+my_plotter_total.plot(x, y_scaled_total_avg, title=args.name, legend="Trained Classifier Scaled")
+my_plotter_total.plot(x, y_grad_scaled_total_avg, title=args.name, legend="Trained Classifier Grad Scaled")
+my_plotter_total.plot(x, nmc_ideal_cum_total_avg, title=args.name, legend="Ideal NMC")
+my_plotter_total.plot(x, y1_total_avg, title=args.name, legend="Trained Classifier")
+my_plotter_total.plot(x, train_y_total_avg, title=args.name, legend="Trained Classifier Train Set")
+
+# Saving the line plot
+my_plotter_total.save_fig(my_experiment.path + "_avg_over_all_seeds",
+                          dataset.classes + 1, title='Avg over ' + str(len(args.seeds)) + ' epochs')
+
