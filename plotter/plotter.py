@@ -37,10 +37,10 @@ class Plotter():
         self.y = y
         plt.grid(color='0.89', linestyle='--', linewidth=1.0)
         if error is None:
-            l, = plt.plot(x, y, linestyle=next(self.lines), marker=next(self.marker), label=legend, linewidth=3.0)
+            l, = plt.plot(x, y, linestyle=next(self.lines), marker=next(self.marker), label=legend, linewidth=1.5)
         else:
             l = plt.errorbar(x, y, yerr=error, capsize=4.0, capthick=2.0, linestyle=next(self.lines),
-                             marker=next(self.marker), label=legend, linewidth=3.0)
+                             marker=next(self.marker), label=legend, linewidth=1.5)
 
         self.handles.append(l)
         self.x_label = xLabel
@@ -51,7 +51,7 @@ class Plotter():
     def save_fig(self, path, xticks=105, title=None, yStart=0, xRange=0, yRange=10):
         if title is not None:
             plt.title(title)
-        plt.legend(handles=self.handles)
+        plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left", handles=self.handles, fancybox=True, framealpha=0.5)
         plt.ylim((yStart, 100 + 0.2))
         plt.xlim((0, xticks + .2))
         plt.ylabel(self.y_label)

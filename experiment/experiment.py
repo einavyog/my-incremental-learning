@@ -7,6 +7,7 @@
 import json
 import os
 import subprocess
+from time import gmtime, strftime
 
 
 class experiment:
@@ -26,9 +27,7 @@ class experiment:
             self.results = {}
             self.dir = output_dir
 
-            import datetime
-            now = datetime.datetime.now()
-            rootFolder = str(now.day) + str(now.month) + str(now.year)
+            rootFolder = strftime("%Y_%m_%d", gmtime())
             if not os.path.exists(output_dir + rootFolder):
                 os.makedirs(output_dir + rootFolder)
             self.name = rootFolder + "/" + self.name

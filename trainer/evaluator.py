@@ -133,11 +133,17 @@ class NearestMeanEvaluator():
         self.means = np.zeros((classes, model.featureSize))
         self.totalFeatures = np.zeros((classes, 1)) + .001
         logger.debug("Computing means")
+
         # Iterate over all train Dataset
         for batch_id, (data, y, target) in enumerate(train_loader):
             # Get features for a minibactch
+            if 1 == target.__len__():
+                print('Skip due to single target')
+                continue
+
             if self.cuda:
                 data = data.cuda()
+
             features = model.forward(Variable(data), True)
             # Convert result to a numpy array
             featuresNp = features.data.cpu().numpy()

@@ -19,6 +19,8 @@ import experiment as ex
 import model
 import plotter as plt
 import trainer
+import copy
+
 
 import utils.Colorer
 
@@ -27,6 +29,8 @@ from subprocess import check_output
 
 # os.environ["CUDA_VISIBLE_DEVICES"]="2"
 sys.version
+
+USE_MODEL_JM=True
 
 print("PyTorch version: ")
 print(torch.__version__)
@@ -37,7 +41,7 @@ print(torch.backends.cudnn.version())
 
 from subprocess import check_output
 
-logger = logging.getLogger('iCARL')
+# logger = logging.getLogger('iCARL')
 
 parser = argparse.ArgumentParser(description='iCarl2.0')
 parser.add_argument('--batch-size', type=int, default=64, metavar='N',
@@ -61,6 +65,7 @@ parser.add_argument('--no-random', action='store_true', default=False,
 parser.add_argument('--no-herding', action='store_true', default=False,
                     help='Disable herding for NMC')
 parser.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3, 4, 5],
+# parser.add_argument('--seeds', type=int, nargs='+', default=[1],
                     help='Seeds values to be used')
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
@@ -82,9 +87,9 @@ parser.add_argument('--decay', type=float, default=0.00005, help='Weight decay (
 parser.add_argument('--alpha-increment', type=float, default=1.0, help='Weight decay (L2 penalty).')
 parser.add_argument('--step-size', type=int, default=2, help='How many classes to add in each increment')
 parser.add_argument('--T', type=float, default=1, help='Tempreture used for softening the targets')
-parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000],
+parser.add_argument('--memory-budgets', type=int, nargs='+', default=[500],
                     help='How many images can we store at max. 0 will result in fine-tuning')
-parser.add_argument('--epochs-class', type=int, default=25, help='Number of epochs for each increment')
+parser.add_argument('--epochs-class', type=int, default=3, help='Number of epochs for each increment')
 parser.add_argument('--dataset', default="MNIST", help='Dataset to be used; example CIFAR100, CIFAR10, MNIST')
 parser.add_argument('--lwf', action='store_true', default=False,
                     help='Use learning without forgetting. Ignores memory-budget '
@@ -118,12 +123,7 @@ if args.step_size < 2:
     assert False
 
 # Plotting the line diagrams of all the possible cases
-y_total = []
-y_scaled_total = []
-y_grad_scaled_total = []
-nmc_ideal_cum_total = []
-y1_total = []
-train_y_total = []
+y_total, y1_total, train_y_total, y_total_jm, y1_total_jm, train_y_total_jm = ([] for i in range(6))
 
 # Run an experiment corresponding to every seed value
 for seed in args.seeds:
@@ -137,9 +137,10 @@ for seed in args.seeds:
             if args.lwf:
                 args.memory_budget = 0
 
-            experiment_name = args.dataset + '_' + str(args.epochs_class) + \
+            experiment_name = 'JM_' + args.dataset + '_' + str(args.epochs_class) + \
                               'epochs_' + str(args.lr).replace('.', 'p') + \
-                              'lr_' + str(seed) + '_jacobian_matching_' + str(args.jacobian_matching)
+                              'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'memory_' +\
+                              str(args.batch_size) + 'batch_size'
 
             # Fix the seed.
             args.seed = seed
@@ -180,14 +181,21 @@ for seed in args.seeds:
             train_iterator_nmc = torch.utils.data.DataLoader(train_dataset_loader_nmc,
                                                              batch_size=args.batch_size, shuffle=True, **kwargs)
             # Iterator to iterate over test data
-            test_iterator = torch.utils.data.DataLoader(
-                test_dataset_loader,
-                batch_size=args.batch_size, shuffle=True, **kwargs)
+            test_iterator = torch.utils.data.DataLoader(test_dataset_loader,
+                                                        batch_size=args.batch_size, shuffle=True, **kwargs)
 
             # Get the required model
             myModel = model.ModelFactory.get_model(args.model_type, args.dataset)
             if args.cuda:
                 myModel.cuda()
+
+            if USE_MODEL_JM:
+                # Get the required model
+                myModel_jm = model.ModelFactory.get_model(args.model_type, args.dataset)
+                if args.cuda:
+                    myModel_jm.cuda()
+                myModel_jm.load_state_dict(copy.deepcopy(myModel.state_dict()))
+
 
             # Define an experiment.
             my_experiment = ex.experiment(experiment_name, args, output_dir=args.outputDir)
@@ -221,31 +229,40 @@ for seed in args.seeds:
             # Define the optimizer used in the experiment
             optimizer = torch.optim.SGD(myModel.parameters(), args.lr, momentum=args.momentum,
                                         weight_decay=args.decay, nesterov=True)
+            # Define the optimizer used in the experiment
+            optimizer_jm = torch.optim.SGD(myModel_jm.parameters(), args.lr, momentum=args.momentum,
+                                        weight_decay=args.decay, nesterov=True)
 
             # Trainer object used for training
             my_trainer = trainer.Trainer(train_iterator, test_iterator, dataset, myModel, args, optimizer,
-                                         train_iterator_nmc)
+                                         train_iterator_nmc, myModel_jm, optimizer_jm)
 
             # Parameters for storing the results
             x, y, y1, train_y, y_scaled, y_grad_scaled, nmc_ideal_cum = ([] for i in range(7))
+            y_jm, y1_jm, train_y_jm, y_scaled_jm, y_grad_scaled_jm, nmc_ideal_cum_jm = ([] for i in range(6))
 
             # Initilize the evaluators used to measure the performance of the system.
             nmc = trainer.EvaluatorFactory.get_evaluator("nmc", args.cuda)
             nmc_ideal = trainer.EvaluatorFactory.get_evaluator("nmc", args.cuda)
             t_classifier = trainer.EvaluatorFactory.get_evaluator("trainedClassifier", args.cuda)
 
+            # Initilize the evaluators used to measure the performance of the system.
+            nmc_jm = trainer.EvaluatorFactory.get_evaluator("nmc", args.cuda)
+            nmc_ideal_jm = trainer.EvaluatorFactory.get_evaluator("nmc", args.cuda)
+            t_classifier_jm = trainer.EvaluatorFactory.get_evaluator("trainedClassifier", args.cuda)
+
             # Loop that incrementally adds more and more classes
             for class_group in range(0, dataset.classes, args.step_size):
                 print("SEED:", seed, "MEMORY_BUDGET:", m, "CLASS_GROUP:", class_group)
                 # Add new classes to the train, train_nmc, and test iterator
                 my_trainer.increment_classes(class_group)
-                my_trainer.update_frozen_model()
+                my_trainer.update_frozen_model(USE_MODEL_JM)
                 epoch = 0
 
                 # Running epochs_class epochs
                 for epoch in range(0, args.epochs_class):
-                    my_trainer.update_lr(epoch)
-                    my_trainer.train(epoch, is_jacobian_matching=args.jacobian_matching)
+                    my_trainer.update_lr(epoch, use_jm=USE_MODEL_JM)
+                    my_trainer.train(epoch, is_jacobian_matching=args.jacobian_matching, use_model_jm=USE_MODEL_JM)
 
                     # print(my_trainer.threshold)
                     if epoch % args.log_interval == (args.log_interval - 1):
@@ -290,11 +307,34 @@ for seed in args.seeds:
                 tempTrain = t_classifier.evaluate(my_trainer.model, train_iterator)
                 train_y.append(tempTrain)
 
-                testY1 = nmc.evaluate(my_trainer.model, test_iterator, step_size=args.step_size, kMean=True)
+                # testY1 = nmc.evaluate(my_trainer.model, test_iterator, step_size=args.step_size, kMean=True)
+
                 testY = nmc.evaluate(my_trainer.model, test_iterator)
-                testY_ideal = nmc_ideal.evaluate(my_trainer.model, test_iterator)
                 y.append(testY)
+
+                testY_ideal = nmc_ideal.evaluate(my_trainer.model, test_iterator)
                 nmc_ideal_cum.append(testY_ideal)
+
+                if USE_MODEL_JM:
+                    y_grad_scaled_jm.append(t_classifier_jm.evaluate(my_trainer.model_jm,
+                                                                     test_iterator, my_trainer.threshold2, False,
+                                                                     my_trainer.older_classes, args.step_size))
+                    y_scaled_jm.append(t_classifier_jm.evaluate(my_trainer.model_jm,
+                                                                test_iterator, my_trainer.threshold, False,
+                                                                my_trainer.older_classes, args.step_size))
+
+                    y1_jm.append(t_classifier_jm.evaluate(my_trainer.model_jm, test_iterator))
+
+                    # Update means using the train iterator; this is iCaRL case #TODO: Einav. check issue
+                    nmc_jm.update_means(my_trainer.model_jm, train_iterator, dataset.classes)
+                    # Update mean using all the data. This is equivalent to memory_budget = infinity
+                    nmc_ideal_jm.update_means(my_trainer.model_jm, train_iterator_nmc, dataset.classes)
+
+                    # Compute the the nmc based classification results
+                    train_y_jm.append(t_classifier_jm.evaluate(my_trainer.model_jm, train_iterator))
+
+                    y_jm.append(nmc_jm.evaluate(my_trainer.model_jm, test_iterator))
+                    nmc_ideal_cum_jm.append(nmc_ideal_jm.evaluate(my_trainer.model_jm, test_iterator))
 
                 # Compute confusion matrices of all three cases (Learned classifier, iCaRL, and ideal NMC)
                 tcMatrix = t_classifier.get_confusion_matrix(my_trainer.model, test_iterator, dataset.classes)
@@ -314,6 +354,25 @@ for seed in args.seeds:
                                                                             my_trainer.older_classes,
                                                                             args.step_size, True)
 
+                if USE_MODEL_JM:
+                    # Compute confusion matrices of all three cases (Learned classifier, iCaRL, and ideal NMC)
+                    tcMatrix_jm = t_classifier_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator, dataset.classes)
+                    tcMatrix_scaled_jm = t_classifier_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator, dataset.classes,
+                                                                        my_trainer.threshold, my_trainer.older_classes,
+                                                                        args.step_size)
+                    tcMatrix_grad_scaled_jm = t_classifier_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator,
+                                                                             dataset.classes,
+                                                                             my_trainer.threshold2,
+                                                                             my_trainer.older_classes,
+                                                                             args.step_size)
+                    nmcMatrix_jm = nmc_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator, dataset.classes)
+                    nmcMatrixIdeal_jm = nmc_ideal_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator, dataset.classes)
+                    tcMatrix_scaled_binning_jm = t_classifier_jm.get_confusion_matrix(my_trainer.model_jm, test_iterator,
+                                                                                dataset.classes,
+                                                                                my_trainer.threshold,
+                                                                                my_trainer.older_classes,
+                                                                                args.step_size, True)
+
                 my_trainer.setup_training()
 
                 # Store the resutls in the my_experiment object; this object should contain all the information required to reproduce the results.
@@ -325,6 +384,15 @@ for seed in args.seeds:
                 my_experiment.results["Trained Classifier Grad Scaled"] = [x, [float(p) for p in y_grad_scaled]]
                 my_experiment.results["Train Error Classifier"] = [x, [float(p) for p in train_y]]
                 my_experiment.results["Ideal NMC"] = [x, [float(p) for p in nmc_ideal_cum]]
+
+                if USE_MODEL_JM:
+                    my_experiment.results["NMC JM"] = [x, [float(p) for p in y_jm]]
+                    my_experiment.results["Trained Classifier JM"] = [x, [float(p) for p in y1_jm]]
+                    my_experiment.results["Trained Classifier Scaled JM"] = [x, [float(p) for p in y_scaled_jm]]
+                    my_experiment.results["Trained Classifier Grad Scaled JM"] = [x, [float(p) for p in y_grad_scaled_jm]]
+                    my_experiment.results["Train Error Classifier JM"] = [x, [float(p) for p in train_y_jm]]
+                    my_experiment.results["Ideal NMC JM"] = [x, [float(p) for p in nmc_ideal_cum_jm]]
+
                 my_experiment.store_json()
 
                 # Finally, plotting the results;
@@ -343,52 +411,78 @@ for seed in args.seeds:
                 my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
                                       my_experiment.path + "_nmc_matrix_ideal",
                                       nmcMatrixIdeal)
+                if USE_MODEL_JM:
+                    # Plotting the confusion matrices
+                    my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
+                                          my_experiment.path + "_tc_matrix_jm", tcMatrix_jm)
+                    my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
+                                          my_experiment.path + "_tc_matrix_scaled_jm", tcMatrix_scaled_jm)
+                    my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
+                                          my_experiment.path + "_tc_matrix_scaled_binning_jm", tcMatrix_scaled_binning_jm)
+                    my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
+                                          my_experiment.path + "_nmc_matrix_jm",
+                                          nmcMatrix_jm)
+                    my_plotter.plotMatrix(int(class_group / args.step_size) * args.epochs_class + epoch,
+                                          my_experiment.path + "_nmc_matrix_ideal_jm",
+                                          nmcMatrixIdeal_jm)
 
                 # Plotting the line diagrams of all the possible cases
                 my_plotter.plot(x, y, title=args.name, legend="NMC")
                 # my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
-                my_plotter.plot(x, y_scaled, title=args.name, legend="Trained Classifier Scaled")
-                my_plotter.plot(x, y_grad_scaled, title=args.name, legend="Trained Classifier Grad Scaled")
-                my_plotter.plot(x, nmc_ideal_cum, title=args.name, legend="Ideal NMC")
+                # my_plotter.plot(x, y_scaled, title=args.name, legend="Trained Classifier Scaled")
+                # my_plotter.plot(x, y_grad_scaled, title=args.name, legend="Trained Classifier Grad Scaled")
+                # my_plotter.plot(x, nmc_ideal_cum, title=args.name, legend="Ideal NMC")
                 my_plotter.plot(x, y1, title=args.name, legend="Trained Classifier")
                 my_plotter.plot(x, train_y, title=args.name, legend="Trained Classifier Train Set")
 
+                if USE_MODEL_JM:
+                    my_plotter.plot(x, y_jm, title=args.name, legend="NMC jm")
+                    # my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
+                    # my_plotter.plot(x, y_scaled_jm, title=args.name, legend="Trained Classifier Scaled jm")
+                    # my_plotter.plot(x, y_grad_scaled_jm, title=args.name, legend="Trained Classifier Grad Scaled jm")
+                    # my_plotter.plot(x, nmc_ideal_cum_jm, title=args.name, legend="Ideal NMC jm")
+                    my_plotter.plot(x, y1_jm, title=args.name, legend="Trained Classifier jm")
+                    my_plotter.plot(x, train_y_jm, title=args.name, legend="Trained Classifier Train Set jm")
+
                 # Saving the line plot
-                my_plotter.save_fig(my_experiment.path, dataset.classes + 1)
+                my_plotter.save_fig(my_experiment.path, dataset.classes + 1, xRange=1.5, yRange=10)
 
             y_total.append(y)
-            y_scaled_total.append(y_scaled)
-            y_grad_scaled_total.append(y_grad_scaled)
-            nmc_ideal_cum_total.append(nmc_ideal_cum)
+            y_total_jm.append(y_jm)
+            y1_total_jm.append(y1_jm)
+            train_y_total_jm.append(train_y_jm)
             y1_total.append(y1)
             train_y_total.append(train_y)
 
 #Plot avarage over all runs:
 ncols = len(y_total[0])
 nrows = len(y_total)
+#
+# y_total_avg = ncols*[0]
+# y_total_jm_avg = ncols*[0]
+# y1_total_jm_avg = ncols*[0]
+# train_y_total_jm_avg = ncols*[0]
+# y1_total_avg = ncols*[0]
+# train_y_total_avg = ncols*[0]
 
-y_total_avg = ncols*[0]
-y_scaled_total_avg = ncols*[0]
-y_grad_scaled_total_avg = ncols*[0]
-nmc_ideal_cum_total_avg = ncols*[0]
-y1_total_avg = ncols*[0]
-train_y_total_avg = ncols*[0]
+y_total_avg, y_total_jm_avg, y1_total_jm_avg, train_y_total_jm_avg, y1_total_avg, train_y_total_avg = \
+    (ncols*[0] for i in range(6))
 
 nelem = float(nrows)
 col = 0
 for col in range(ncols):
     for row in range(nrows):
         y_total_avg[col] += y_total[row][col]
-        y_scaled_total_avg[col] += y_scaled_total[row][col]
-        y_grad_scaled_total_avg[col] += y_grad_scaled_total[row][col]
-        nmc_ideal_cum_total_avg[col] += nmc_ideal_cum_total[row][col]
         y1_total_avg[col] += y1_total[row][col]
         train_y_total_avg[col] += train_y_total[row][col]
+        y_total_jm_avg[col] += y_total_jm[row][col]
+        y1_total_jm_avg[col] += y1_total_jm[row][col]
+        train_y_total_jm_avg[col] += train_y_total_jm[row][col]
 
     y_total_avg[col] /= nelem
-    y_scaled_total_avg[col] /= nelem
-    y_grad_scaled_total_avg[col] /= nelem
-    nmc_ideal_cum_total_avg[col] /= nelem
+    y_total_jm_avg[col] /= nelem
+    y1_total_jm_avg[col] /= nelem
+    train_y_total_jm_avg[col] /= nelem
     y1_total_avg[col] /= nelem
     train_y_total_avg[col] /= nelem
 
@@ -396,11 +490,11 @@ my_plotter_total = plt.Plotter()
 
 # Plotting the line diagrams of all the possible cases
 my_plotter_total.plot(x, y_total_avg, title=args.name, legend="NMC")
-my_plotter_total.plot(x, y_scaled_total_avg, title=args.name, legend="Trained Classifier Scaled")
-my_plotter_total.plot(x, y_grad_scaled_total_avg, title=args.name, legend="Trained Classifier Grad Scaled")
-my_plotter_total.plot(x, nmc_ideal_cum_total_avg, title=args.name, legend="Ideal NMC")
+my_plotter_total.plot(x, y_total_jm_avg, title=args.name, legend="NMC JM")
 my_plotter_total.plot(x, y1_total_avg, title=args.name, legend="Trained Classifier")
+my_plotter_total.plot(x, y1_total_jm_avg, title=args.name, legend="Trained Classifier JM")
 my_plotter_total.plot(x, train_y_total_avg, title=args.name, legend="Trained Classifier Train Set")
+my_plotter_total.plot(x, train_y_total_jm_avg, title=args.name, legend="Trained Classifier Train Set JM")
 
 # Saving the line plot
 my_plotter_total.save_fig(my_experiment.path + "_avg_over_all_seeds",
