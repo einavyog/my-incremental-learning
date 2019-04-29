@@ -16,6 +16,7 @@ from torch.autograd import Variable
 from torchvision import datasets, transforms
 
 logger = logging.getLogger('iCARL')
+np.random.seed(0)
 
 
 class IncrementalLoader(td.Dataset):

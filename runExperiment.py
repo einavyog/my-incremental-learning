@@ -13,6 +13,7 @@ import logging
 import torch
 import torch.utils.data as td
 import sys
+from torch import nn
 
 import dataHandler
 import experiment as ex
@@ -27,6 +28,7 @@ import utils.Colorer
 import os
 from subprocess import check_output
 
+# os.environ["CUDA_VISIBLE_DEVICES"]="2"
 # os.environ["CUDA_VISIBLE_DEVICES"]="2"
 sys.version
 
@@ -73,7 +75,7 @@ parser.add_argument('--model-type', default="resnet32",
                     help='model type to be used. Example : resnet32, resnet20, densenet, test')
 parser.add_argument('--name', default=None,
                     help='Name of the experiment')
-parser.add_argument('--outputDir', default="../",
+parser.add_argument('--outputDir', default="./results/",
                     help='Directory to store the results; a new folder "DDMMYYYY" will be created '
                          'in the specified directory to save the results.')
 parser.add_argument('--upsampling', action='store_true', default=False,
@@ -84,6 +86,7 @@ parser.add_argument('--unstructured-size', type=int, default=0, help='Number of 
 parser.add_argument('--alphas', type=float, nargs='+', default=[1.0],
                     help='Weight given to new classes vs old classes in loss')
 parser.add_argument('--decay', type=float, default=0.00005, help='Weight decay (L2 penalty).')
+parser.add_argument('--jm_decay', type=float, default=0.00005, help='Kacobian Matching decay (L2 penalty).')
 parser.add_argument('--alpha-increment', type=float, default=1.0, help='Weight decay (L2 penalty).')
 parser.add_argument('--step-size', type=int, default=2, help='How many classes to add in each increment')
 parser.add_argument('--T', type=float, default=1, help='Tempreture used for softening the targets')
@@ -101,9 +104,15 @@ parser.add_argument('--rand', action='store_true', default=False,
 parser.add_argument('--adversarial', action='store_true', default=False,
                     help='Replace exemplars with adversarial instances')
 parser.add_argument('--jacobian_matching', action='store_true')
+parser.add_argument('--pretrained_model', default=None,
+                    help='Path to model weights')
+parser.add_argument('--pretrained_model_jm', default=None,
+                    help='Path to model weights for jacobian matching model')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
+
+# torch.backends.cudnn.benchmark = True
 
 IS_RUN_LOCAL = False
 ips = check_output(['hostname', '--all-ip-addresses'])
@@ -112,8 +121,8 @@ if ips == b'132.66.50.93 \n':
     print('running local')
 
 args.is_run_local = IS_RUN_LOCAL
-if IS_RUN_LOCAL:
-    args.outputDir = './results/'
+# if IS_RUN_LOCAL:
+#     args.outputDir = './results/'
 
 dataset = dataHandler.DatasetFactory.get_dataset(args.dataset)
 
@@ -137,16 +146,23 @@ for seed in args.seeds:
             if args.lwf:
                 args.memory_budget = 0
 
-            experiment_name = 'JM_' + args.dataset + '_' + str(args.epochs_class) + \
-                              'epochs_' + str(args.lr).replace('.', 'p') + \
-                              'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'memory_' +\
-                              str(args.batch_size) + 'batch_size'
+            experiment_name = args.dataset + '_' + str(args.epochs_class) + \
+                              'e_' + str(args.lr).replace('.', 'p') + \
+                              'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'mem_' +\
+                              str(args.batch_size) + 'batch_' + str(args.step_size) + 'inc_' + \
+                              str(args.jm_decay) + 'decay'
 
             # Fix the seed.
             args.seed = seed
             torch.manual_seed(seed)
             if args.cuda:
                 torch.cuda.manual_seed(seed)
+                # torch.backends.cudnn.deterministic = True
+                # print('You have chosen to seed training. '
+                #       'This will turn on the CUDNN deterministic setting, '
+                #       'which can slow down your training considerably! '
+                #       'You may see unexpected behavior when restarting '
+                #       'from checkpoints.')
 
             # Loader used for training data
             train_dataset_loader = dataHandler.IncrementalLoader(dataset.train_data.train_data,
@@ -187,15 +203,16 @@ for seed in args.seeds:
             # Get the required model
             myModel = model.ModelFactory.get_model(args.model_type, args.dataset)
             if args.cuda:
+                myModel = nn.DataParallel(myModel)
                 myModel.cuda()
 
             if USE_MODEL_JM:
                 # Get the required model
                 myModel_jm = model.ModelFactory.get_model(args.model_type, args.dataset)
                 if args.cuda:
+                    myModel_jm = nn.DataParallel(myModel_jm)
                     myModel_jm.cuda()
                 myModel_jm.load_state_dict(copy.deepcopy(myModel.state_dict()))
-
 
             # Define an experiment.
             my_experiment = ex.experiment(experiment_name, args, output_dir=args.outputDir)
@@ -231,11 +248,13 @@ for seed in args.seeds:
                                         weight_decay=args.decay, nesterov=True)
             # Define the optimizer used in the experiment
             optimizer_jm = torch.optim.SGD(myModel_jm.parameters(), args.lr, momentum=args.momentum,
-                                        weight_decay=args.decay, nesterov=True)
+                                           weight_decay=args.decay, nesterov=True)
 
             # Trainer object used for training
             my_trainer = trainer.Trainer(train_iterator, test_iterator, dataset, myModel, args, optimizer,
                                          train_iterator_nmc, myModel_jm, optimizer_jm)
+
+            my_trainer.load_models(args.pretrained_model, args.pretrained_model_jm)
 
             # Parameters for storing the results
             x, y, y1, train_y, y_scaled, y_grad_scaled, nmc_ideal_cum = ([] for i in range(7))
@@ -268,12 +287,12 @@ for seed in args.seeds:
                     if epoch % args.log_interval == (args.log_interval - 1):
                         tError = t_classifier.evaluate(my_trainer.model, train_iterator)
                         logger.debug("*********CURRENT EPOCH********** : %d", epoch)
-                        logger.debug("Train Classifier: %0.2f", tError)
-                        logger.debug("Test Classifier: %0.2f", t_classifier.evaluate(my_trainer.model, test_iterator))
-                        logger.debug("Test Classifier Scaled: %0.2f",
+                        logger.debug("Train Classifier: %0.4f", tError)
+                        logger.debug("Test Classifier: %0.4f", t_classifier.evaluate(my_trainer.model, test_iterator))
+                        logger.debug("Test Classifier Scaled: %0.4f",
                                      t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
                                                            my_trainer.older_classes, args.step_size))
-                        logger.info("Test Classifier Grad Scaled: %0.2f",
+                        logger.info("Test Classifier Grad Scaled: %0.4f",
                                     t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
                                                           my_trainer.older_classes, args.step_size))
 
@@ -433,7 +452,7 @@ for seed in args.seeds:
                 # my_plotter.plot(x, y_grad_scaled, title=args.name, legend="Trained Classifier Grad Scaled")
                 # my_plotter.plot(x, nmc_ideal_cum, title=args.name, legend="Ideal NMC")
                 my_plotter.plot(x, y1, title=args.name, legend="Trained Classifier")
-                my_plotter.plot(x, train_y, title=args.name, legend="Trained Classifier Train Set")
+                # my_plotter.plot(x, train_y, title=args.name, legend="Trained Classifier Train Set")
 
                 if USE_MODEL_JM:
                     my_plotter.plot(x, y_jm, title=args.name, legend="NMC jm")
@@ -442,10 +461,11 @@ for seed in args.seeds:
                     # my_plotter.plot(x, y_grad_scaled_jm, title=args.name, legend="Trained Classifier Grad Scaled jm")
                     # my_plotter.plot(x, nmc_ideal_cum_jm, title=args.name, legend="Ideal NMC jm")
                     my_plotter.plot(x, y1_jm, title=args.name, legend="Trained Classifier jm")
-                    my_plotter.plot(x, train_y_jm, title=args.name, legend="Trained Classifier Train Set jm")
+                    # my_plotter.plot(x, train_y_jm, title=args.name, legend="Trained Classifier Train Set jm")
 
                 # Saving the line plot
-                my_plotter.save_fig(my_experiment.path, dataset.classes + 1, xRange=1.5, yRange=10)
+                my_plotter.save_fig(my_experiment.path, dataset.classes)
+                my_trainer.save_models(my_experiment.path)
 
             y_total.append(y)
             y_total_jm.append(y_jm)
@@ -454,16 +474,10 @@ for seed in args.seeds:
             y1_total.append(y1)
             train_y_total.append(train_y)
 
+
 #Plot avarage over all runs:
 ncols = len(y_total[0])
 nrows = len(y_total)
-#
-# y_total_avg = ncols*[0]
-# y_total_jm_avg = ncols*[0]
-# y1_total_jm_avg = ncols*[0]
-# train_y_total_jm_avg = ncols*[0]
-# y1_total_avg = ncols*[0]
-# train_y_total_avg = ncols*[0]
 
 y_total_avg, y_total_jm_avg, y1_total_jm_avg, train_y_total_jm_avg, y1_total_avg, train_y_total_avg = \
     (ncols*[0] for i in range(6))

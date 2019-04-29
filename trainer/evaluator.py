@@ -13,6 +13,7 @@ from torch.autograd import Variable
 from torchnet.meter import confusionmeter
 
 logger = logging.getLogger('iCARL')
+np.random.seed(0)
 
 
 class EvaluatorFactory():
@@ -50,7 +51,7 @@ class NearestMeanEvaluator():
         '''
         model.eval()
         if self.means is None:
-            self.means = np.zeros((100, model.featureSize))
+            self.means = np.zeros((100, model.module.featureSize))
         correct = 0
 
         for data, y, target in loader:
@@ -127,10 +128,10 @@ class NearestMeanEvaluator():
         '''
         # Set the mean to zero
         if self.means is None:
-            self.means = np.zeros((classes, model.featureSize))
+            self.means = np.zeros((classes, model.module.featureSize))
         self.means *= 0
         self.classes = classes
-        self.means = np.zeros((classes, model.featureSize))
+        self.means = np.zeros((classes, model.module.featureSize))
         self.totalFeatures = np.zeros((classes, 1)) + .001
         logger.debug("Computing means")
 

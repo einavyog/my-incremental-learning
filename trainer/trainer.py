@@ -19,8 +19,10 @@ from tqdm import tqdm
 import model
 from  torch.autograd import backward
 from torch.autograd.gradcheck import zero_gradients
+import os
 
 logger = logging.getLogger('iCARL')
+np.random.seed(0)
 
 
 class GenericTrainer:
@@ -46,6 +48,7 @@ class GenericTrainer:
         self.model_fixed_jm = copy.deepcopy(self.model_jm)
         self.models_jm = []
         self.current_lr_jm = args.lr
+        self.decay_jm = args.jm_decay
 
         for param in self.model_fixed.parameters():
             param.requires_grad = False
@@ -411,10 +414,7 @@ class Trainer(GenericTrainer):
                     jacobian = self.compute_jacobian(data, use_fixed_model=False, use_model_jm=use_model_jm)
                     jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True, use_model_jm=use_model_jm)
 
-                    if torch.isnan(jacobian.data[0, 0, 0, 0, 0]):
-                        print('Nan!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-
-                    loss3 = 0.001*torch.norm(jacobian - jacobian_model_fixed)
+                    loss3 = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
                     loss3.backward(retain_graph=True)
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
@@ -456,6 +456,13 @@ class Trainer(GenericTrainer):
             self.threshold2[self.args.unstructured_size +
                             len(self.older_classes) +
                             self.args.step_size: len(self.threshold2)] = np.max(self.threshold2)
+
+        if logger is not None and epoch % 20 == (20 - 1):
+            logger.debug("*********CURRENT EPOCH********** : %d", epoch)
+            logger.debug("Classification loss: %0.4f", loss)
+            if not self.args.no_distill and len(self.older_classes) > 0:
+                logger.debug("Distillation loss: %0.4f", loss2)
+                logger.debug("Jacobian Matching loss: %0.4f", loss3)
 
     def addModel(self):
         model = copy.deepcopy(self.model_single)
@@ -533,3 +540,18 @@ class Trainer(GenericTrainer):
             # print (self.train_data_iterator.dataset.labels[indices[0]], "SUM", np.sum(self.train_data_iterator.dataset.labels[indices[0]]))
 
         self.train_data_iterator.dataset.getIndexElem(False)
+
+    def save_models(self,  file_name):
+        torch.save(self.model.state_dict(), file_name + '.pth')
+        torch.save(self.model_jm.state_dict(), file_name + '_jm.pth')
+
+    def load_models(self, pretrained_model=None, pretrained_model_jm=None):
+
+        if pretrained_model:
+            pretrain_parameters = torch.load(pretrained_model)
+            self.model.load_state_dict(pretrain_parameters)
+
+        if pretrained_model_jm:
+            pretrain_parameters = torch.load(pretrained_model_jm)
+            self.model_jm.load_state_dict(pretrain_parameters)
+

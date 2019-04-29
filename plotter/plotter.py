@@ -48,7 +48,7 @@ class Plotter():
         if title is not None:
             plt.title(title)
 
-    def save_fig(self, path, xticks=105, title=None, yStart=0, xRange=0, yRange=10):
+    def save_fig(self, path, xticks=105, title=None, yStart=0, xStart=0, xRange=0, yRange=10):
         if title is not None:
             plt.title(title)
         plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left", handles=self.handles, fancybox=True, framealpha=0.5)
@@ -58,7 +58,7 @@ class Plotter():
         plt.xlabel(self.x_label)
         plt.yticks(list(range(yStart, 101, yRange)))
         print(list(range(yStart, 105, yRange)))
-        plt.xticks(list(range(0, xticks + 1, xRange + int(xticks / 10))))
+        plt.xticks(list(range(xStart, xticks + 1, xRange + int(xticks / 10))))
         plt.savefig(path + ".eps", format='eps')
         plt.gcf().clear()
 
