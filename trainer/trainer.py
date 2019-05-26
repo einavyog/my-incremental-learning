@@ -285,6 +285,21 @@ class Trainer(GenericTrainer):
         self.model_single = myModel
         self.optimizer_single = optimizer
 
+    ################ Function for Norm Jacobian calculation ################
+    def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False, is_norm=True):
+        jacobian = self.compute_jacobian(data, use_fixed_model, use_model_jm)
+
+        if is_norm:
+            jn = torch.norm(jacobian, dim=(3, 4)).detach()
+            jn = jn.unsqueeze(3)
+            jn = jn.unsqueeze(4)
+            jacobian_norm = jacobian.div(jn.expand_as(jacobian))
+
+            return jacobian_norm
+
+        else:
+            return jacobian
+
     ################ Function for Jacobian calculation ################
     def compute_jacobian(self, data, use_fixed_model=True, use_model_jm=False):
 
@@ -310,6 +325,7 @@ class Trainer(GenericTrainer):
             grad_output = grad_output.cuda()
 
         for i in range(num_classes):
+        #for i in self.older_classes:
             zero_gradients(inputs)
 
             grad_output_curr = grad_output.clone()
@@ -325,6 +341,10 @@ class Trainer(GenericTrainer):
 
         return jacobian
 
+    def do_backward_patch(self):
+        return True
+        # return (self.train_data_iterator.dataset.active_classes[-1] != self.train_data_iterator.dataset.total_classes -1)
+
     def train(self, epoch, is_jacobian_matching=True, use_model_jm=False):
 
         self.model.train()
@@ -335,27 +355,33 @@ class Trainer(GenericTrainer):
         torch.manual_seed(self.seed)
 
         for data, y, target in tqdm(self.train_data_iterator):
-            if 1 == target.__len__():
-                print('Skip due to single target')
+
+            if self.args.batch_size != target.__len__():
+                print('Skip due to small target len')
                 continue
 
-            if self.args.cuda:
-                data, target = data.cuda(), target.cuda()
-                y = y.cuda()
+            if 0 == epoch:
+                try:
+                    bin_count += target.bincount()
+                except NameError:
+                    bin_count = target.bincount()
 
-            oldClassesIndices = (target * 0).int()
+            if self.args.cuda:
+                data, target, y = data.cuda(), target.cuda(), y.cuda()
+
+            old_classes_indices = (target * 0).int()
 
             for elem in range(0, self.args.unstructured_size):
-                oldClassesIndices = oldClassesIndices + (target == elem).int()
+                old_classes_indices = old_classes_indices + (target == elem).int()
 
-            # old_classes_indices = torch.squeeze(torch.nonzero((oldClassesIndices > 0)).long())
-            new_classes_indices = torch.squeeze(torch.nonzero((oldClassesIndices == 0)).long())
+            # old_classes_indices = torch.squeeze(torch.nonzero((old_classes_indices > 0)).long())
+            new_classes_indices = torch.squeeze(torch.nonzero((old_classes_indices == 0)).long())
 
             self.optimizer.zero_grad()
             if use_model_jm:
                 self.optimizer_jm.zero_grad()
 
-            # Use only new classes for normal loss:
+            # Use only new classes for normal classification_loss:
             target_normal_loss = target[new_classes_indices]
             data_normal_loss = data[new_classes_indices]
 
@@ -363,7 +389,7 @@ class Trainer(GenericTrainer):
             # target_distillation_loss = y.float()
             data_distillation_loss = data
 
-            # Create y_onehot tensor for normal loss
+            # Create y_onehot tensor for normal classification_loss
             try:
                 y_onehot = torch.FloatTensor(len(target_normal_loss), self.dataset.classes)
             except:
@@ -380,11 +406,11 @@ class Trainer(GenericTrainer):
             self.threshold += np.sum(y_onehot.cpu().numpy(), 0)
 
             output = self.model(Variable(data_normal_loss))
-            loss = F.kl_div(output, Variable(y_onehot))
+            classification_loss = F.kl_div(output, Variable(y_onehot))
 
             if use_model_jm:
                 output_jm = self.model_jm(Variable(data_normal_loss))
-                loss_jm = F.kl_div(output_jm, Variable(y_onehot))
+                classification_loss_jm = F.kl_div(output_jm, Variable(y_onehot))
 
             myT = self.args.T
 
@@ -404,18 +430,27 @@ class Trainer(GenericTrainer):
                         output2 = output
                         pred2 = pred2[new_classes_indices, :] #My addition due to fail (Einav)
 
-                    loss2 = F.kl_div(output2, Variable(pred2))
-                    loss2.backward(retain_graph=True)
+                    # distillation_loss = F.kl_div(output2[:, self.older_classes], Variable(pred2[:, self.older_classes]))
+                    distillation_loss = F.kl_div(output2, Variable(pred2))
+                    if self.do_backward_patch():
+                        distillation_loss.backward(retain_graph=True)
                     self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
 
                 if is_jacobian_matching or use_model_jm:
-                    # self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha #TODO: Change cpu threshold for loss3 Einav
+                    # self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
+                    # #TODO: Change cpu threshold for jacobian_matching_loss Einav
 
-                    jacobian = self.compute_jacobian(data, use_fixed_model=False, use_model_jm=use_model_jm)
-                    jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True, use_model_jm=use_model_jm)
+                    jacobian = self.compute_normalized_jacobian(data, use_fixed_model=False,
+                                                                use_model_jm=use_model_jm, is_norm=True)
+                    jacobian_model_fixed = self.compute_normalized_jacobian(data, use_fixed_model=True,
+                                                                            use_model_jm=use_model_jm, is_norm=True)
 
-                    loss3 = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
-                    loss3.backward(retain_graph=True)
+                    jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
+                    if self.do_backward_patch():
+                        jacobian_matching_loss.backward(retain_graph=True)
+
+                    if 0 == epoch:
+                        self.plot_3d(jacobian.detach())
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
                 for param in self.model.parameters():
@@ -428,19 +463,26 @@ class Trainer(GenericTrainer):
                         if param.grad is not None:
                             param.grad = param.grad * (myT * myT) * self.args.alpha
 
-            if len(self.older_classes) == 0 or not self.args.no_nl:
-                loss.backward()
-                if use_model_jm:
-                    loss_jm.backward()
+            if self.do_backward_patch():
+                if len(self.older_classes) == 0 or not self.args.no_nl:
+                    classification_loss.backward()
+                    if use_model_jm:
+                        classification_loss_jm.backward()
 
             for param in self.model.named_parameters():
                 if "fc.weight" in param[0]:
                     self.threshold2 *= 0.99
                     self.threshold2 += np.sum(np.abs(param[1].grad.data.cpu().numpy()), 1)
 
+
             self.optimizer.step()
             if use_model_jm:
                 self.optimizer_jm.step()
+
+        if 0 == epoch:
+            bin_count_norm = bin_count.float() / bin_count.float().sum()
+            print('\nbin_count: ', bin_count)
+            print("bin_count_norm: ", bin_count_norm)
 
         if self.args.no_nl:
             self.threshold[len(self.older_classes):len(self.threshold)] = np.max(self.threshold)
@@ -457,12 +499,12 @@ class Trainer(GenericTrainer):
                             len(self.older_classes) +
                             self.args.step_size: len(self.threshold2)] = np.max(self.threshold2)
 
-        if logger is not None and epoch % 20 == (20 - 1):
+        if logger is not None and epoch % 10 == (10 - 1):
             logger.debug("*********CURRENT EPOCH********** : %d", epoch)
-            logger.debug("Classification loss: %0.4f", loss)
+            logger.debug("Classification classification_loss: %0.4f", classification_loss)
             if not self.args.no_distill and len(self.older_classes) > 0:
-                logger.debug("Distillation loss: %0.4f", loss2)
-                logger.debug("Jacobian Matching loss: %0.4f", loss3)
+                logger.debug("Distillation classification_loss: %0.4f", distillation_loss)
+                logger.debug("Jacobian Matching classification_loss: %0.4f", jacobian_matching_loss)
 
     def addModel(self):
         model = copy.deepcopy(self.model_single)
@@ -554,4 +596,53 @@ class Trainer(GenericTrainer):
         if pretrained_model_jm:
             pretrain_parameters = torch.load(pretrained_model_jm)
             self.model_jm.load_state_dict(pretrain_parameters)
+
+    def plot_3d(self, jacobian):
+
+        from mpl_toolkits.mplot3d import Axes3D
+
+        import matplotlib.pyplot as plt
+        from matplotlib import cm
+        from matplotlib.ticker import LinearLocator, FormatStrFormatter
+        import numpy as np
+
+        if 'MNIST' in self.args.dataset:
+            len_x = jacobian.shape[-2] * jacobian.shape[-1]
+        else:
+            len_x = jacobian.shape[-2] * jacobian.shape[-3] * jacobian.shape[-1]
+
+        len_y = jacobian.shape[-5]
+
+
+        for im_num in range(0, jacobian.shape[1]):
+            fig = plt.figure()
+            ax = fig.gca(projection='3d')
+
+
+            # Make data.
+            X = np.arange(0, len_x)
+            Y = np.arange(0, len_y)
+            X, Y = np.meshgrid(X, Y)
+
+            Z_tmp = torch.squeeze(jacobian[:,0,:,:,:])
+            Z = np.array(Z_tmp.reshape([len_y, len_x]).cpu())
+            Z = np.abs(Z)
+            # R = np.sqrt(X ** 2 + Y ** 2)
+            # Z = np.sin(R)
+
+            # Plot the surface.
+            surf = ax.plot_surface(X, Y, Z, cmap=cm.coolwarm,
+                                   linewidth=0, antialiased=False)
+
+            # Customize the z axis.
+            ax.set_zlim(-1.01, 1.01)
+            ax.zaxis.set_major_locator(LinearLocator(10))
+            ax.zaxis.set_major_formatter(FormatStrFormatter('%.02f'))
+
+            # Add a color bar which maps values to colors.
+            fig.colorbar(surf, shrink=0.5, aspect=5)
+
+            plt.show()
+            fig.savefig('demo_' + str(im_num) + '.png', bbox_inches='tight')
+            plt.close(fig)
 

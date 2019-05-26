@@ -58,6 +58,14 @@ class NearestMeanEvaluator():
             if self.cuda:
                 data, target = data.cuda(), target.cuda()
                 self.means = self.means.cuda()
+
+            try:
+                bin_count += target.bincount()
+            except NameError:
+                bin_count = target.bincount()
+            except RuntimeError:
+                pass
+
             data, target = Variable(data), Variable(target)
             output = model(data, True).unsqueeze(1)
             result = (output.data - self.means.float())
@@ -80,11 +88,14 @@ class NearestMeanEvaluator():
             _, pred = torch.min(result, 1)
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
 
+        print('\nbin_count: ', bin_count)
+        bin_count_norm = bin_count.float() / bin_count.float().sum()
+        print("bin_count_norm: ", bin_count_norm)
+
         return 100. * correct / len(loader.dataset)
 
     def get_confusion_matrix(self, model, loader, size):
         '''
-        
         :param model: Trained model
         :param loader: Data iterator
         :param size: Size of confusion matrix (Equal to largest possible label predicted by the model)

@@ -21,7 +21,7 @@ import model
 import plotter as plt
 import trainer
 import copy
-
+import seaborn as sns
 
 import utils.Colorer
 
@@ -51,8 +51,10 @@ parser.add_argument('--batch-size', type=int, default=64, metavar='N',
 parser.add_argument('--lr', type=float, default=2.0, metavar='LR',
                     help='learning rate (default: 2.0)')
 parser.add_argument('--schedule', type=int, nargs='+', default=[45, 60, 68],
+# parser.add_argument('--schedule', type=int, nargs='+', default=[0, 5, 8],
                     help='Decrease learning rate at these epochs.')
 parser.add_argument('--gammas', type=float, nargs='+', default=[0.2, 0.2, 0.2],
+# parser.add_argument('--gammas', type=float, nargs='+', default=[0.1, 0.02, 0.004],
                     help='LR is multiplied by gamma on schedule, number of gammas should be equal to schedule')
 parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                     help='SGD momentum (default: 0.9)')
@@ -146,7 +148,7 @@ for seed in args.seeds:
             if args.lwf:
                 args.memory_budget = 0
 
-            experiment_name = args.dataset + '_' + str(args.epochs_class) + \
+            experiment_name = 'norm_jm_' + args.dataset + '_' + str(args.epochs_class) + \
                               'e_' + str(args.lr).replace('.', 'p') + \
                               'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'mem_' +\
                               str(args.batch_size) + 'batch_' + str(args.step_size) + 'inc_' + \
@@ -474,8 +476,7 @@ for seed in args.seeds:
             y1_total.append(y1)
             train_y_total.append(train_y)
 
-
-#Plot avarage over all runs:
+# Plot avarage over all runs:
 ncols = len(y_total[0])
 nrows = len(y_total)
 
@@ -514,3 +515,25 @@ my_plotter_total.plot(x, train_y_total_jm_avg, title=args.name, legend="Trained 
 my_plotter_total.save_fig(my_experiment.path + "_avg_over_all_seeds",
                           dataset.classes + 1, title='Avg over ' + str(len(args.seeds)) + ' epochs')
 
+import numpy as np
+import pandas as pd
+
+y_total_df = pd.DataFrame(columns=['Number Of Classes', 'Accuracy'])
+a = list(map(list, zip(*y_total)))
+col = 0
+for class_group in range(0, dataset.classes, args.step_size):
+    curr_class = class_group + args.step_size
+    print(curr_class)
+    row = 0
+    for seed in args.seeds:
+        tmp = np.transpose([np.array(y_total)[:, col].astype(int), [curr_class, curr_class]])
+        y_total_df = y_total_df.append(pd.DataFrame(tmp, columns=['Number Of Classes', 'Accuracy']), ignore_index=True)
+        row += 1
+    col += 1
+
+print(y_total_df)
+print(y_total)
+
+y_total_df = y_total_df.astype(int)
+a = sns.lineplot(x='Number Of Classes', y='Accuracy', data=y_total_df, legend='full').get_figure()
+a.savefig(my_experiment.path + "_avg_over_all_seeds.pdf")
