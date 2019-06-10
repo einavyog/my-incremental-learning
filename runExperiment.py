@@ -29,7 +29,6 @@ import os
 from subprocess import check_output
 
 # os.environ["CUDA_VISIBLE_DEVICES"]="2"
-# os.environ["CUDA_VISIBLE_DEVICES"]="2"
 sys.version
 
 USE_MODEL_JM=True
@@ -105,7 +104,9 @@ parser.add_argument('--rand', action='store_true', default=False,
                     help='Replace exemplars with random noice instances')
 parser.add_argument('--adversarial', action='store_true', default=False,
                     help='Replace exemplars with adversarial instances')
-parser.add_argument('--jacobian_matching', action='store_true')
+parser.add_argument('--norm_jacobian', action='store_true', default=False,
+                    help='Use normed Jacobian for Jacobiam matchon. Relevanty only when using --jacobian_matching')
+parser.add_argument('--jacobian_matching', action='store_true', default=False)
 parser.add_argument('--pretrained_model', default=None,
                     help='Path to model weights')
 parser.add_argument('--pretrained_model_jm', default=None,
@@ -148,7 +149,12 @@ for seed in args.seeds:
             if args.lwf:
                 args.memory_budget = 0
 
-            experiment_name = 'norm_jm_' + args.dataset + '_' + str(args.epochs_class) + \
+            if args.norm_jacobian:
+                method_str = 'norm_jm_'
+            else:
+                method_str = 'jm_'
+
+            experiment_name = method_str + args.dataset + '_' + str(args.epochs_class) + \
                               'e_' + str(args.lr).replace('.', 'p') + \
                               'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'mem_' +\
                               str(args.batch_size) + 'batch_' + str(args.step_size) + 'inc_' + \
@@ -172,23 +178,21 @@ for seed in args.seeds:
                                                                  dataset.labels_per_class_train,
                                                                  dataset.classes, [],
                                                                  transform=dataset.train_transform,
-                                                                 cuda=args.cuda, oversampling=not args.upsampling,
-                                                                 )
+                                                                 cuda=args.cuda, oversampling=not args.upsampling)
+
             # Special loader use to compute ideal NMC; i.e, NMC that using all the data points to compute the mean embedding
             train_dataset_loader_nmc = dataHandler.IncrementalLoader(dataset.train_data.train_data,
                                                                      dataset.train_data.train_labels,
                                                                      dataset.labels_per_class_train,
                                                                      dataset.classes, [],
                                                                      transform=dataset.train_transform,
-                                                                     cuda=args.cuda, oversampling=not args.upsampling,
-                                                                     )
+                                                                     cuda=args.cuda, oversampling=not args.upsampling)
             # Loader for test data.
             test_dataset_loader = dataHandler.IncrementalLoader(dataset.test_data.test_data,
                                                                 dataset.test_data.test_labels,
                                                                 dataset.labels_per_class_test,
                                                                 dataset.classes, [],
-                                                                transform=dataset.test_transform, cuda=args.cuda,
-                                                                )
+                                                                transform=dataset.test_transform, cuda=args.cuda)
 
             kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 

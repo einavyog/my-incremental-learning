@@ -2,7 +2,8 @@ import numpy as np
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torchnet.meter import confusionmeter
-
+import matplotlib.pyplot as plt
+import torch
 
 def resize_image(img, factor):
     '''
@@ -30,7 +31,7 @@ def save_confusion_matrix(epoch, path, model, args, dataset, test_loader):
             data, target = data.cuda(), target.cuda()
         data, target = Variable(data, volatile=True), Variable(target)
         output = model(data)
-        test_loss += F.nll_loss(output, target, size_average=False).data[0]  # sum up batch loss
+        test_loss += F.nll_loss(output, target, reduction='sum').data[0]  # sum up batch loss
         pred = output.data.max(1, keepdim=True)[1]  # get the index of the max log-probability
         correct += pred.eq(target.data.view_as(pred)).cpu().sum()
         if epoch > 0:
@@ -45,16 +46,9 @@ def save_confusion_matrix(epoch, path, model, args, dataset, test_loader):
     plt.gcf().clear()
     return 100. * correct / len(test_loader.dataset)
 
-
-import matplotlib.pyplot as plt
-
 cur = 1
 
-
 # Function to plot images;
-
-
-
 def plot(img, title, g=True):
     global cur, fig
     p = fig.add_subplot(10, 10, cur)
@@ -82,3 +76,11 @@ def visualizeTensor(t, path):
     plt.savefig(path)
     plt.gcf().clear()
     plt.close()
+
+
+def matmul(X, Y):
+    results = []
+    for i in range(X.size(0)):
+        result = torch.mv(X[i], Y[i])
+        results.append(result.unsqueeze(1))
+    return torch.cat(results, 1)

@@ -54,7 +54,7 @@ class CifarResNet(nn.Module):
     https://arxiv.org/abs/1512.03385.pdf
     """
 
-    def __init__(self, block, depth, num_classes, channels=3):
+    def __init__(self, block, depth, num_classes, channels=3, num_of_inc_classes=2, is_model_jm=False):
         """ Constructor
         Args:
           depth: number of layers.
@@ -69,6 +69,13 @@ class CifarResNet(nn.Module):
         layer_blocks = (depth - 2) // 6
 
         self.num_classes = num_classes
+        self.is_model_jm = is_model_jm
+        self.num_of_inc_classes = num_of_inc_classes
+
+        if is_model_jm:
+            self.output_dim = num_of_inc_classes
+        else:
+            self.output_dim = num_classes
 
         self.conv_1_3x3 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn_1 = nn.BatchNorm2d(16)
@@ -78,8 +85,8 @@ class CifarResNet(nn.Module):
         self.stage_2 = self._make_layer(block, 32, layer_blocks, 2)
         self.stage_3 = self._make_layer(block, 64, layer_blocks, 2)
         self.avgpool = nn.AvgPool2d(8)
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
-        self.fc2 = nn.Linear(64 * block.expansion, num_classes)
+        self.fc = nn.Linear(64 * block.expansion, self.output_dim)
+        self.fc2 = nn.Linear(64 * block.expansion, self.output_dim)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -94,6 +101,14 @@ class CifarResNet(nn.Module):
                 init.kaiming_normal_(m.weight)
                 m.bias.data.zero_()
 
+    # def extend_output(self, block):
+    #     old_output_dim = self.output_dim
+    #     self.output_dim = self.output_dim + self.num_of_inc_classes
+    #     weights = self.fc.weight.data
+    #
+    #     self.fc = nn.Linear(weights.shape[0], self.output_dim)
+    #     self.fc.weight.data[0:old_output_dim] = weights.__deepcopy__()
+
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
@@ -107,7 +122,7 @@ class CifarResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, feature=False, T=1, labels=False, scale=None, keep=None):
+    def forward(self, x, feature=False, T=1, labels=False, scale=None, keep=None, embedding_space=False):
 
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
@@ -115,12 +130,17 @@ class CifarResNet(nn.Module):
         x = self.stage_2(x)
         x = self.stage_3(x)
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
+
+        embedded = x.view(x.size(0), -1)
+
         if feature:
-            return x / torch.norm(x, 2, 1).unsqueeze(1)
-        x = self.fc(x) / T
+            return embedded / torch.norm(embedded, 2, 1).unsqueeze(1)
+
+        x = self.fc(embedded) / T
+
         if keep is not None:
             x = x[:, keep[0]:keep[1]]
+
         if labels:
             return F.softmax(x, dim=1)
 
@@ -128,6 +148,9 @@ class CifarResNet(nn.Module):
             temp = F.softmax(x, dim=1)
             temp = temp * scale
             return temp
+
+        if embedding_space:
+            return F.log_softmax(x, dim=1), x
 
         return F.log_softmax(x, dim=1)
 

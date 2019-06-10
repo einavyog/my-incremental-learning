@@ -20,10 +20,12 @@ import model
 from  torch.autograd import backward
 from torch.autograd.gradcheck import zero_gradients
 import os
+from utils import matmul
 
 logger = logging.getLogger('iCARL')
 np.random.seed(0)
 
+DEBUG = False
 
 class GenericTrainer:
     '''
@@ -286,19 +288,37 @@ class Trainer(GenericTrainer):
         self.optimizer_single = optimizer
 
     ################ Function for Norm Jacobian calculation ################
-    def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False, is_norm=True):
-        jacobian = self.compute_jacobian(data, use_fixed_model, use_model_jm)
+    def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False,
+                                    is_norm=True, is_calc_from_embedded=True):
 
-        if is_norm:
-            jn = torch.norm(jacobian, dim=(3, 4)).detach()
-            jn = jn.unsqueeze(3)
-            jn = jn.unsqueeze(4)
-            jacobian_norm = jacobian.div(jn.expand_as(jacobian))
+        if is_calc_from_embedded:
+            jacobian = self.compute_jacobian_from_embedded(data, use_fixed_model, use_model_jm)
 
-            return jacobian_norm
+            if is_norm:
+                a = jacobian.detach()
+                a = a.view(10, self.args.batch_size, -1)
+                b = torch.norm(a, dim=(0, 2))
+                b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+                jacobian_norm = jacobian.div(b.expand_as(jacobian))
 
+                return jacobian_norm
+
+            else:
+                return jacobian
         else:
-            return jacobian
+            jacobian = self.compute_jacobian(data, use_fixed_model, use_model_jm)
+
+            if is_norm:
+                a = jacobian.detach()
+                a = a.view(len(self.older_classes), self.args.batch_size, -1)
+                b = torch.norm(a, dim=(0, 2))
+                b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+                jacobian_norm = jacobian.div(b.expand_as(jacobian))
+
+                return jacobian_norm
+
+            else:
+                return jacobian
 
     ################ Function for Jacobian calculation ################
     def compute_jacobian(self, data, use_fixed_model=True, use_model_jm=False):
@@ -307,14 +327,14 @@ class Trainer(GenericTrainer):
 
         if not use_model_jm:
             if use_fixed_model:
-                output = self.model_fixed(inputs)
+                output = self.model_fixed.forward(inputs)
             else:
-                output = self.model(inputs)
+                output = self.model.forward(inputs)
         else:
             if use_fixed_model:
                 output = self.model_fixed_jm.forward(inputs)
             else:
-                output = self.model_jm(inputs)
+                output = self.model_jm.forward(inputs)
 
         num_classes = output.size()[1]
 
@@ -324,8 +344,7 @@ class Trainer(GenericTrainer):
         if inputs.is_cuda:
             grad_output = grad_output.cuda()
 
-        for i in range(num_classes):
-        #for i in self.older_classes:
+        for i in self.older_classes:
             zero_gradients(inputs)
 
             grad_output_curr = grad_output.clone()
@@ -341,9 +360,68 @@ class Trainer(GenericTrainer):
 
         return jacobian
 
+    ################ Function for Jacobian calculation ################
+    def compute_jacobian_from_embedded(self, data, use_fixed_model=True, use_model_jm=False):
+
+        inputs = Variable(data, requires_grad=True)
+
+        if not use_model_jm:
+            if use_fixed_model:
+                output, embedded = self.model_fixed.forward(inputs, embedding_space=True)
+            else:
+                output, embedded = self.model.forward(inputs, embedding_space=True)
+        else:
+            if use_fixed_model:
+                output, embedded = self.model_fixed_jm.forward(inputs, embedding_space=True)
+            else:
+                output, embedded = self.model_jm.forward(inputs, embedding_space=True)
+
+        random_normal_mat = torch.randn(embedded.size()[0], 10, embedded.size()[-1])
+
+        if self.args.cuda:
+            random_normal_mat = random_normal_mat.cuda()
+
+        embedded_projection = matmul(random_normal_mat, embedded)
+
+        jacobian_list = []
+        grad_output = torch.zeros(*embedded_projection.size())
+
+        if inputs.is_cuda:
+            grad_output = grad_output.cuda()
+
+        for i in range(embedded_projection.size()[0]):
+            zero_gradients(inputs)
+
+            grad_output_curr = grad_output.clone()
+            grad_output_curr[i, :] = 1
+            jacobian_list.append(torch.autograd.grad(outputs=embedded_projection,
+                                                     inputs=inputs,
+                                                     grad_outputs=grad_output_curr,
+                                                     only_inputs=True,
+                                                     retain_graph=True,
+                                                     create_graph=not use_fixed_model)[0])
+
+        jacobian = torch.stack(jacobian_list, dim=0)
+
+        return jacobian
+
     def do_backward_patch(self):
         return True
-        # return (self.train_data_iterator.dataset.active_classes[-1] != self.train_data_iterator.dataset.total_classes -1)
+        # return (len(self.older_classes) < 2)
+
+    def scale_gradient_by_square_of_T(self, myT, use_model_jm):
+
+        # Scale gradient by a factor of square of T.
+        # See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
+        for param in self.model.parameters():
+            if param.grad is not None:
+                param.grad = param.grad * (myT * myT) * self.args.alpha
+
+        if use_model_jm:
+            # TODO: check if square of T is needed here too (Einav)
+            for param in self.model_jm.parameters():
+                if param.grad is not None:
+                    param.grad = param.grad * self.args.alpha
 
     def train(self, epoch, is_jacobian_matching=True, use_model_jm=False):
 
@@ -437,31 +515,27 @@ class Trainer(GenericTrainer):
                     self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
 
                 if is_jacobian_matching or use_model_jm:
-                    # self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
-                    # #TODO: Change cpu threshold for jacobian_matching_loss Einav
+                    # #TODO: Change cpu threshold for jacobian_matching_loss (Einav)
 
                     jacobian = self.compute_normalized_jacobian(data, use_fixed_model=False,
-                                                                use_model_jm=use_model_jm, is_norm=True)
+                                                                use_model_jm=use_model_jm,
+                                                                is_norm=self.args.norm_jacobian,
+                                                                is_calc_from_embedded=True)
+
                     jacobian_model_fixed = self.compute_normalized_jacobian(data, use_fixed_model=True,
-                                                                            use_model_jm=use_model_jm, is_norm=True)
+                                                                            use_model_jm=use_model_jm,
+                                                                            is_norm=self.args.norm_jacobian,
+                                                                            is_calc_from_embedded=True)
 
                     jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
+
                     if self.do_backward_patch():
                         jacobian_matching_loss.backward(retain_graph=True)
 
-                    if 0 == epoch:
-                        self.plot_3d(jacobian.detach())
+                    # if DEBUG and 0 == epoch:
+                    #     self.plot_3d(jacobian.detach())
 
-                # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param.grad = param.grad * (myT * myT) * self.args.alpha
-
-                if use_model_jm:
-                    # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
-                    for param in self.model_jm.parameters():
-                        if param.grad is not None:
-                            param.grad = param.grad * (myT * myT) * self.args.alpha
+                self.scale_gradient_by_square_of_T(myT, use_model_jm)
 
             if self.do_backward_patch():
                 if len(self.older_classes) == 0 or not self.args.no_nl:
@@ -474,15 +548,14 @@ class Trainer(GenericTrainer):
                     self.threshold2 *= 0.99
                     self.threshold2 += np.sum(np.abs(param[1].grad.data.cpu().numpy()), 1)
 
-
             self.optimizer.step()
             if use_model_jm:
                 self.optimizer_jm.step()
 
         if 0 == epoch:
             bin_count_norm = bin_count.float() / bin_count.float().sum()
-            print('\nbin_count: ', bin_count)
-            print("bin_count_norm: ", bin_count_norm)
+            logger.debug("bin_count: " + str(bin_count.tolist()))
+            logger.debug("bin_count_norm: " + str(bin_count_norm.tolist()))
 
         if self.args.no_nl:
             self.threshold[len(self.older_classes):len(self.threshold)] = np.max(self.threshold)
@@ -501,10 +574,10 @@ class Trainer(GenericTrainer):
 
         if logger is not None and epoch % 10 == (10 - 1):
             logger.debug("*********CURRENT EPOCH********** : %d", epoch)
-            logger.debug("Classification classification_loss: %0.4f", classification_loss)
+            logger.debug("Classification Loss: %0.4f", classification_loss)
             if not self.args.no_distill and len(self.older_classes) > 0:
-                logger.debug("Distillation classification_loss: %0.4f", distillation_loss)
-                logger.debug("Jacobian Matching classification_loss: %0.4f", jacobian_matching_loss)
+                logger.debug("Distillation Loss: %0.4f", distillation_loss)
+                logger.debug("Jacobian Matching Loss: %0.4f", jacobian_matching_loss)
 
     def addModel(self):
         model = copy.deepcopy(self.model_single)
@@ -605,44 +678,47 @@ class Trainer(GenericTrainer):
         from matplotlib import cm
         from matplotlib.ticker import LinearLocator, FormatStrFormatter
         import numpy as np
+        #
+        # if 'MNIST' in self.args.dataset:
+        #     len_x = jacobian.shape[-2] * jacobian.shape[-1]
+        # else:
+        #     len_x = jacobian.shape[-2] * jacobian.shape[-3] * jacobian.shape[-1]
+        #
+        # len_y = jacobian.shape[-5]
 
-        if 'MNIST' in self.args.dataset:
-            len_x = jacobian.shape[-2] * jacobian.shape[-1]
-        else:
-            len_x = jacobian.shape[-2] * jacobian.shape[-3] * jacobian.shape[-1]
+        len_x = jacobian.shape[-1]
+        len_y = jacobian.shape[-2]
 
-        len_y = jacobian.shape[-5]
+        # for im_num in range(0, jacobian.shape[1]):
+        im_num = 0
+        fig = plt.figure()
+        ax = fig.gca(projection='3d')
 
+        # Make data.
+        X = np.arange(0, len_x)
+        Y = np.arange(0, len_y)
+        X, Y = np.meshgrid(X, Y)
 
-        for im_num in range(0, jacobian.shape[1]):
-            fig = plt.figure()
-            ax = fig.gca(projection='3d')
+        Z_tmp = torch.squeeze(jacobian[:, im_num, :, :, :]).cpu()
+        Z = np.sum(np.abs(Z_tmp.numpy()), axis=0)
+        if 'MNIST' not in self.args.dataset:
+            Z = np.sum(Z, axis=0)
 
+        # Z = np.array(Z_tmp.reshape([len_y, len_x]).cpu())
 
-            # Make data.
-            X = np.arange(0, len_x)
-            Y = np.arange(0, len_y)
-            X, Y = np.meshgrid(X, Y)
+        # Plot the surface.
+        surf = ax.plot_surface(X, Y, Z, cmap=cm.coolwarm,
+                               linewidth=0, antialiased=False)
 
-            Z_tmp = torch.squeeze(jacobian[:,0,:,:,:])
-            Z = np.array(Z_tmp.reshape([len_y, len_x]).cpu())
-            Z = np.abs(Z)
-            # R = np.sqrt(X ** 2 + Y ** 2)
-            # Z = np.sin(R)
+        # Customize the z axis.
+        ax.set_zlim(-0.01, np.max(Z))
+        ax.zaxis.set_major_locator(LinearLocator(10))
+        ax.zaxis.set_major_formatter(FormatStrFormatter('%.02f'))
 
-            # Plot the surface.
-            surf = ax.plot_surface(X, Y, Z, cmap=cm.coolwarm,
-                                   linewidth=0, antialiased=False)
+        # Add a color bar which maps values to colors.
+        fig.colorbar(surf, shrink=0.5, aspect=5)
 
-            # Customize the z axis.
-            ax.set_zlim(-1.01, 1.01)
-            ax.zaxis.set_major_locator(LinearLocator(10))
-            ax.zaxis.set_major_formatter(FormatStrFormatter('%.02f'))
-
-            # Add a color bar which maps values to colors.
-            fig.colorbar(surf, shrink=0.5, aspect=5)
-
-            plt.show()
-            fig.savefig('demo_' + str(im_num) + '.png', bbox_inches='tight')
-            plt.close(fig)
+        plt.show()
+        fig.savefig(self.args.dataset + '_' + str(im_num) + '.png', bbox_inches='tight')
+        plt.close(fig)
 
