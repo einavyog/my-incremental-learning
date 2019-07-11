@@ -69,13 +69,6 @@ class CifarResNet(nn.Module):
         layer_blocks = (depth - 2) // 6
 
         self.num_classes = num_classes
-        self.is_model_jm = is_model_jm
-        self.num_of_inc_classes = num_of_inc_classes
-
-        if is_model_jm:
-            self.output_dim = num_of_inc_classes
-        else:
-            self.output_dim = num_classes
 
         self.conv_1_3x3 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn_1 = nn.BatchNorm2d(16)
@@ -85,8 +78,8 @@ class CifarResNet(nn.Module):
         self.stage_2 = self._make_layer(block, 32, layer_blocks, 2)
         self.stage_3 = self._make_layer(block, 64, layer_blocks, 2)
         self.avgpool = nn.AvgPool2d(8)
-        self.fc = nn.Linear(64 * block.expansion, self.output_dim)
-        self.fc2 = nn.Linear(64 * block.expansion, self.output_dim)
+        self.fc = nn.Linear(64 * block.expansion, num_classes)
+        self.fc2 = nn.Linear(64 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -97,17 +90,8 @@ class CifarResNet(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
             elif isinstance(m, nn.Linear):
-                # init.kaiming_normal(m.weight)
-                init.kaiming_normal_(m.weight)
+                init.kaiming_normal(m.weight)
                 m.bias.data.zero_()
-
-    # def extend_output(self, block):
-    #     old_output_dim = self.output_dim
-    #     self.output_dim = self.output_dim + self.num_of_inc_classes
-    #     weights = self.fc.weight.data
-    #
-    #     self.fc = nn.Linear(weights.shape[0], self.output_dim)
-    #     self.fc.weight.data[0:old_output_dim] = weights.__deepcopy__()
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -150,6 +134,7 @@ class CifarResNet(nn.Module):
             return temp
 
         if embedding_space:
+            # return F.log_softmax(x, dim=1), x
             return F.log_softmax(x, dim=1), embedded
 
         return F.log_softmax(x, dim=1)

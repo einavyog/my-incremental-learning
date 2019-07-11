@@ -13,13 +13,13 @@ from torch.autograd import Variable
 from torchnet.meter import confusionmeter
 
 logger = logging.getLogger('iCARL')
-np.random.seed(0)
 
 
 class EvaluatorFactory():
     '''
     This class is used to get different versions of evaluators
     '''
+
     def __init__(self):
         pass
 
@@ -36,6 +36,7 @@ class NearestMeanEvaluator():
     Nearest Class Mean based classifier. Mean embedding is computed and stored; at classification time, the embedding closest to the 
     input embedding corresponds to the predicted class.
     '''
+
     def __init__(self, cuda):
         self.cuda = cuda
         self.means = None
@@ -96,6 +97,7 @@ class NearestMeanEvaluator():
 
     def get_confusion_matrix(self, model, loader, size):
         '''
+        
         :param model: Trained model
         :param loader: Data iterator
         :param size: Size of confusion matrix (Equal to largest possible label predicted by the model)
@@ -325,13 +327,14 @@ class softmax_evaluator():
                         float(targetTemp[a]) / step_size) * step_size) + step_size] += 20
 
                 output = torch.from_numpy(outputTemp)
-
                 if self.cuda:
                     output = output.cuda()
                 output = Variable(output)
 
             test_loss += F.nll_loss(output, target, reduction='sum').data.item()  # sum up batch loss
-            pred = output.data.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            # test_loss += F.nll_loss(output, target, size_average=False).data[0]  # sum up batch loss
+            pred = output.data.max(1, keepdim=True)[1]  # get the index of the m
+            # ax log-probability
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
             cMatrix.add(pred.squeeze(), target.data.view_as(pred).squeeze())
 
