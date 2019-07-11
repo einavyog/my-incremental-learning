@@ -21,6 +21,7 @@ from  torch.autograd import backward
 from torch.autograd.gradcheck import zero_gradients
 import os
 from utils import matmul
+import time
 
 logger = logging.getLogger('iCARL')
 np.random.seed(0)
@@ -360,6 +361,17 @@ class Trainer(GenericTrainer):
 
         return jacobian
 
+    def calc_jacobian_loop(self, inputs, grad_output, embedded_projection, use_fixed_model, i):
+        zero_gradients(inputs)
+
+        grad_output[i, :] = 1
+        return torch.autograd.grad(outputs=embedded_projection,
+                                   inputs=inputs,
+                                   grad_outputs=grad_output,
+                                   only_inputs=True,
+                                   retain_graph=True,
+                                   create_graph=not use_fixed_model)[0]
+
     ################ Function for Jacobian calculation ################
     def compute_jacobian_from_embedded(self, data, use_fixed_model=True, use_model_jm=False):
 
@@ -389,25 +401,24 @@ class Trainer(GenericTrainer):
         if inputs.is_cuda:
             grad_output = grad_output.cuda()
 
-        for i in range(embedded_projection.size()[0]):
-            zero_gradients(inputs)
+        jacobian_list = [self.calc_jacobian_loop(inputs, grad_output.clone(), embedded_projection, use_fixed_model, i)
+                         for i in range(embedded_projection.size()[0])]
 
-            grad_output_curr = grad_output.clone()
-            grad_output_curr[i, :] = 1
-            jacobian_list.append(torch.autograd.grad(outputs=embedded_projection,
-                                                     inputs=inputs,
-                                                     grad_outputs=grad_output_curr,
-                                                     only_inputs=True,
-                                                     retain_graph=True,
-                                                     create_graph=not use_fixed_model)[0])
+        # for i in range(embedded_projection.size()[0]):
+        #     zero_gradients(inputs)
+        #
+        #     grad_output_curr = grad_output.clone()
+        #     grad_output_curr[i, :] = 1
+        #     jacobian_list.append(torch.autograd.grad(outputs=embedded_projection,
+        #                                              inputs=inputs,
+        #                                              grad_outputs=grad_output_curr,
+        #                                              only_inputs=True,
+        #                                              retain_graph=True,
+        #                                              create_graph=not use_fixed_model)[0])
 
         jacobian = torch.stack(jacobian_list, dim=0)
 
         return jacobian
-
-    def do_backward_patch(self):
-        return True
-        # return (len(self.older_classes) < 2)
 
     def scale_gradient_by_square_of_T(self, myT, use_model_jm):
 
@@ -423,6 +434,17 @@ class Trainer(GenericTrainer):
                 if param.grad is not None:
                     param.grad = param.grad * self.args.alpha
 
+    def cancel_batch_norm_for_increments(self):
+
+            # if self.args.no_bn and len(self.older_classes) > 1:
+            if self.args.no_bn:
+
+                for m in self.model.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+                        # m.weight.requires_grad = False
+                        # m.bias.requires_grad = False
+
     def train(self, epoch, is_jacobian_matching=True, use_model_jm=False):
 
         self.model.train()
@@ -432,10 +454,11 @@ class Trainer(GenericTrainer):
         logger.info("Epoch %d", epoch)
         torch.manual_seed(self.seed)
 
+        self.cancel_batch_norm_for_increments()
+
         for data, y, target in tqdm(self.train_data_iterator):
 
             if self.args.batch_size != target.__len__():
-                print('Skip due to small target len')
                 continue
 
             if 0 == epoch:
@@ -443,6 +466,8 @@ class Trainer(GenericTrainer):
                     bin_count += target.bincount()
                 except NameError:
                     bin_count = target.bincount()
+                except:
+                    print('Couldn''t increase bin_count')
 
             if self.args.cuda:
                 data, target, y = data.cuda(), target.cuda(), y.cuda()
@@ -510,8 +535,8 @@ class Trainer(GenericTrainer):
 
                     # distillation_loss = F.kl_div(output2[:, self.older_classes], Variable(pred2[:, self.older_classes]))
                     distillation_loss = F.kl_div(output2, Variable(pred2))
-                    if self.do_backward_patch():
-                        distillation_loss.backward(retain_graph=True)
+                    distillation_loss.backward(retain_graph=True)
+
                     self.threshold += (np.sum(pred2.cpu().numpy(), 0)) * (myT * myT) * self.args.alpha
 
                 if is_jacobian_matching or use_model_jm:
@@ -529,19 +554,18 @@ class Trainer(GenericTrainer):
 
                     jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
 
-                    if self.do_backward_patch():
-                        jacobian_matching_loss.backward(retain_graph=True)
+                    jacobian_matching_loss.backward(retain_graph=True)
 
                     # if DEBUG and 0 == epoch:
                     #     self.plot_3d(jacobian.detach())
 
                 self.scale_gradient_by_square_of_T(myT, use_model_jm)
 
-            if self.do_backward_patch():
-                if len(self.older_classes) == 0 or not self.args.no_nl:
-                    classification_loss.backward()
-                    if use_model_jm:
-                        classification_loss_jm.backward()
+            if len(self.older_classes) == 0 or not self.args.no_nl:
+                classification_loss.backward()
+                # print(classification_loss)
+                if use_model_jm:
+                    classification_loss_jm.backward()
 
             for param in self.model.named_parameters():
                 if "fc.weight" in param[0]:

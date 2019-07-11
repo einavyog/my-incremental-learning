@@ -150,7 +150,7 @@ class CifarResNet(nn.Module):
             return temp
 
         if embedding_space:
-            return F.log_softmax(x, dim=1), x
+            return F.log_softmax(x, dim=1), embedded
 
         return F.log_softmax(x, dim=1)
 

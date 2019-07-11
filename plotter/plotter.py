@@ -31,11 +31,14 @@ class Plotter():
         self.marker = itertools.cycle(('o', '+', "v", "^", "8", '.', '*'))
         self.handles = []
         self.lines = itertools.cycle(('--', '-.', '-', ':'))
+        self.x_label = ''
+        self.y_label = ''
 
     def plot(self, x, y, xLabel="Number of Classes", yLabel="Accuracy %", legend="none", title=None, error=None):
         self.x = x
         self.y = y
         plt.grid(color='0.89', linestyle='--', linewidth=1.0)
+
         if error is None:
             l, = plt.plot(x, y, linestyle=next(self.lines), marker=next(self.marker), label=legend, linewidth=1.5)
         else:
@@ -45,12 +48,14 @@ class Plotter():
         self.handles.append(l)
         self.x_label = xLabel
         self.y_label = yLabel
+
         if title is not None:
             plt.title(title)
 
     def save_fig(self, path, xticks=105, title=None, yStart=0, xStart=0, xRange=0, yRange=10):
         if title is not None:
             plt.title(title)
+
         plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left", handles=self.handles, fancybox=True, framealpha=0.5)
         plt.ylim((yStart, 100 + 0.2))
         plt.xlim((0, xticks + .2))

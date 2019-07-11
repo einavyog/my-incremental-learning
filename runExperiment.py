@@ -22,6 +22,7 @@ import plotter as plt
 import trainer
 import copy
 import seaborn as sns
+from matplotlib import pyplot
 
 import utils.Colorer
 
@@ -32,6 +33,7 @@ from subprocess import check_output
 sys.version
 
 USE_MODEL_JM=True
+
 
 print("PyTorch version: ")
 print(torch.__version__)
@@ -70,11 +72,11 @@ parser.add_argument('--no-herding', action='store_true', default=False,
 parser.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3, 4, 5],
 # parser.add_argument('--seeds', type=int, nargs='+', default=[1],
                     help='Seeds values to be used')
-parser.add_argument('--log-interval', type=int, default=5, metavar='N',
+parser.add_argument('--log-interval', type=int, default=2, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--model-type', default="resnet32",
                     help='model type to be used. Example : resnet32, resnet20, densenet, test')
-parser.add_argument('--name', default=None,
+parser.add_argument('--name', default='norm_jm',
                     help='Name of the experiment')
 parser.add_argument('--outputDir', default="./results/",
                     help='Directory to store the results; a new folder "DDMMYYYY" will be created '
@@ -107,6 +109,7 @@ parser.add_argument('--adversarial', action='store_true', default=False,
 parser.add_argument('--norm_jacobian', action='store_true', default=False,
                     help='Use normed Jacobian for Jacobiam matchon. Relevanty only when using --jacobian_matching')
 parser.add_argument('--jacobian_matching', action='store_true', default=False)
+parser.add_argument('--no_bn', action='store_true', default=False)
 parser.add_argument('--pretrained_model', default=None,
                     help='Path to model weights')
 parser.add_argument('--pretrained_model_jm', default=None,
@@ -149,16 +152,16 @@ for seed in args.seeds:
             if args.lwf:
                 args.memory_budget = 0
 
-            if args.norm_jacobian:
-                method_str = 'norm_jm_'
-            else:
-                method_str = 'jm_'
+            method_str = args.name + '_'
+            method_str = method_str + 'no_bn_' if args.no_bn else method_str
 
             experiment_name = method_str + args.dataset + '_' + str(args.epochs_class) + \
                               'e_' + str(args.lr).replace('.', 'p') + \
-                              'lr_' + str(seed) + 'seed_' + str(args.memory_budget) + 'mem_' +\
-                              str(args.batch_size) + 'batch_' + str(args.step_size) + 'inc_' + \
-                              str(args.jm_decay) + 'decay'
+                              'lr_' + str(seed) + 's_' + str(args.memory_budget) + 'mem_' + \
+                              str(args.batch_size) + 'b_' + str(args.step_size) + 'inc_' + \
+                              str(args.jm_decay) + 'jmd_' + \
+                              '_'.join([str(item) for item in args.schedule]).replace('.', 'p') + 'sched_' + \
+                              '_'.join([str(item) for item in args.gammas]).replace('.', 'p') + 'gammas'
 
             # Fix the seed.
             args.seed = seed
@@ -248,7 +251,7 @@ for seed in args.seeds:
             logger.info("Input Args:")
             for arg in vars(args):
                 logger.info("%s: %s", arg, str(getattr(args, arg)))
-
+            #
             # Define the optimizer used in the experiment
             optimizer = torch.optim.SGD(myModel.parameters(), args.lr, momentum=args.momentum,
                                         weight_decay=args.decay, nesterov=True)
@@ -256,6 +259,14 @@ for seed in args.seeds:
             optimizer_jm = torch.optim.SGD(myModel_jm.parameters(), args.lr, momentum=args.momentum,
                                            weight_decay=args.decay, nesterov=True)
 
+            # optimizer = torch.optim.Adam(myModel.parameters(), lr=args.lr,
+            #                              betas=(args.momentum, 0.999), eps=1e-08,
+            #                              weight_decay=args.decay, amsgrad=False)
+            #
+            # optimizer_jm = torch.optim.Adam(myModel_jm.parameters(), lr=args.lr,
+            #                                 betas=(args.momentum, 0.999), eps=1e-08,
+            #                                 weight_decay=args.decay, amsgrad=False)
+            #
             # Trainer object used for training
             my_trainer = trainer.Trainer(train_iterator, test_iterator, dataset, myModel, args, optimizer,
                                          train_iterator_nmc, myModel_jm, optimizer_jm)
@@ -285,22 +296,27 @@ for seed in args.seeds:
                 epoch = 0
 
                 # Running epochs_class epochs
+                train_error_all_epochs, test_error_all_epochs, epochs_list = ([] for i in range(3))
+
+                # if 0 == class_group and 'CIFAR100' == args.dataset:
+                #     epochs = args.epochs_class * 2
+                # else:
+                #     epochs = args.epochs_class
+
                 for epoch in range(0, args.epochs_class):
                     my_trainer.update_lr(epoch, use_jm=USE_MODEL_JM)
                     my_trainer.train(epoch, is_jacobian_matching=args.jacobian_matching, use_model_jm=USE_MODEL_JM)
 
                     # print(my_trainer.threshold)
                     if epoch % args.log_interval == (args.log_interval - 1):
-                        tError = t_classifier.evaluate(my_trainer.model, train_iterator)
+                        train_error = t_classifier.evaluate(my_trainer.model, train_iterator)
+                        test_error = t_classifier.evaluate(my_trainer.model, test_iterator)
                         logger.debug("*********CURRENT EPOCH********** : %d", epoch)
-                        logger.debug("Train Classifier: %0.4f", tError)
-                        logger.debug("Test Classifier: %0.4f", t_classifier.evaluate(my_trainer.model, test_iterator))
-                        logger.debug("Test Classifier Scaled: %0.4f",
-                                     t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold, False,
-                                                           my_trainer.older_classes, args.step_size))
-                        logger.info("Test Classifier Grad Scaled: %0.4f",
-                                    t_classifier.evaluate(my_trainer.model, test_iterator, my_trainer.threshold2, False,
-                                                          my_trainer.older_classes, args.step_size))
+                        logger.debug("Train Classifier: %0.4f", train_error)
+                        logger.debug("Test Classifier: %0.4f", test_error)
+                        train_error_all_epochs.append(train_error)
+                        test_error_all_epochs.append(test_error)
+                        epochs_list.append(epoch)
 
                 # Evaluate the learned classifier
                 img = None
@@ -454,7 +470,7 @@ for seed in args.seeds:
                 # Plotting the line diagrams of all the possible cases
                 my_plotter.plot(x, y, title=args.name, legend="NMC")
                 # my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
-                # my_plotter.plot(x, y_scaled, title=args.name, legend="Trained Classifier Scaled")
+                my_plotter.plot(x, y_scaled, title=args.name, legend="Trained Classifier Scaled")
                 # my_plotter.plot(x, y_grad_scaled, title=args.name, legend="Trained Classifier Grad Scaled")
                 # my_plotter.plot(x, nmc_ideal_cum, title=args.name, legend="Ideal NMC")
                 my_plotter.plot(x, y1, title=args.name, legend="Trained Classifier")
@@ -463,7 +479,7 @@ for seed in args.seeds:
                 if USE_MODEL_JM:
                     my_plotter.plot(x, y_jm, title=args.name, legend="NMC jm")
                     # my_plotter.plot(x, higher_y, title=args.name, legend="Higher Model")
-                    # my_plotter.plot(x, y_scaled_jm, title=args.name, legend="Trained Classifier Scaled jm")
+                    my_plotter.plot(x, y_scaled_jm, title=args.name, legend="Trained Classifier Scaled jm")
                     # my_plotter.plot(x, y_grad_scaled_jm, title=args.name, legend="Trained Classifier Grad Scaled jm")
                     # my_plotter.plot(x, nmc_ideal_cum_jm, title=args.name, legend="Ideal NMC jm")
                     my_plotter.plot(x, y1_jm, title=args.name, legend="Trained Classifier jm")
@@ -472,6 +488,15 @@ for seed in args.seeds:
                 # Saving the line plot
                 my_plotter.save_fig(my_experiment.path, dataset.classes)
                 my_trainer.save_models(my_experiment.path)
+
+                pyplot.plot(epochs_list, train_error_all_epochs, label="training", marker='o', linestyle='dashed')
+                pyplot.plot(epochs_list, test_error_all_epochs, label="testing", marker='o', linestyle='dashed')
+                pyplot.xlabel('Epoch')
+                pyplot.ylabel('Accuracy')
+                pyplot.title('Accuracy Class Group ' + str(class_group))
+                pyplot.legend()
+                pyplot.grid(True)
+                pyplot.savefig(my_experiment.path + '_accuracy_per_epoch_class_group' + str(class_group))
 
             y_total.append(y)
             y_total_jm.append(y_jm)
