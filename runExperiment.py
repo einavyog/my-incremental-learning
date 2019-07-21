@@ -95,10 +95,14 @@ parser.add_argument('--pretrained_model', default=None,
                     help='Path to model weights')
 parser.add_argument('--pretrained_model_jm', default=None,
                     help='Path to model weights for jacobian matching model')
-parser.add_argument('--jm_decay', type=float, default=0.001, help='Jacobian Matching decay (L2 penalty).')
+parser.add_argument('--jm_decay', type=float, default=0.0001, help='Jacobian Matching decay (L2 penalty).')
+parser.add_argument('--activation_decay', type=float, default=0.0005, help='Jacobian Matching decay (L2 penalty).')
 parser.add_argument('--norm_jacobian', action='store_true', default=False,
                     help='Use normed Jacobian for Jacobiam matchon. Relevanty only when using --jacobian_matching')
 parser.add_argument('--jacobian_matching', action='store_true', default=False)
+parser.add_argument('--no_projection', action='store_true', default=False)
+parser.add_argument('--no_jm_classification', action='store_true', default=False)
+parser.add_argument('--project_outputs', action='store_true', default=False)
 parser.add_argument('--projection_dim', type=int, default=10,
                     help='The size of the random matrix prior to the Jacobian Matching')
 
@@ -185,6 +189,7 @@ for seed in args.seeds:
                 if args.cuda:
                     myModel_jm = nn.DataParallel(myModel_jm)
                     myModel_jm.cuda()
+
                 myModel_jm.load_state_dict(copy.deepcopy(myModel.state_dict()))
 
             else:

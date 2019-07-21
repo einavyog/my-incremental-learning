@@ -89,3 +89,11 @@ def matmul(X, Y):
         result = torch.mv(X[i], Y[i])
         results.append(result.unsqueeze(1))
     return torch.cat(results, 1)
+
+
+def tensormul(X, Y):
+    results = []
+    for i in range(X.size(0)):
+        result = torch.mm(X[i], Y[i])
+        results.append(result.unsqueeze(1))
+    return torch.cat(results, 1)

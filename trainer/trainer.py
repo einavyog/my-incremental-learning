@@ -21,7 +21,7 @@ import model
 from  torch.autograd import backward
 from torch.autograd.gradcheck import zero_gradients
 import os
-from utils import matmul
+from utils import matmul, tensormul
 import time
 
 logger = logging.getLogger('iCARL')
@@ -146,7 +146,7 @@ class Trainer(GenericTrainer):
         self.dynamic_threshold = np.ones(self.dataset.classes, dtype=np.float64)
         self.gradient_threshold_unreported_experiment = np.ones(self.dataset.classes, dtype=np.float64)
 
-    def setup_training(self, use_jm = False):
+    def setup_training(self, use_jm=False):
         self.reset_dynamic_threshold()
 
         for param_group in self.optimizer.param_groups:
@@ -231,23 +231,93 @@ class Trainer(GenericTrainer):
 
         self.model_single = myModel
         self.optimizer_single = optimizer
+    # 
+    # def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False,
+    #                                 is_norm=True, is_calc_from_embedded=False, random_normal_mat=None):
+    # 
+    #     jacobian = self.compute_jacobian(data, use_fixed_model, use_model_jm, random_normal_mat)
+    # 
+    #     if is_norm:
+    #         jn = torch.norm(jacobian, dim=(3, 4)).detach()
+    #         jn = jn.unsqueeze(3)
+    #         jn = jn.unsqueeze(4)
+    #         jacobian_norm = jacobian.div(jn.expand_as(jacobian))
+    # 
+    #         return jacobian_norm
+    # 
+    #     else:
+    #         return jacobian
+    # 
+    # ################ Function for Jacobian calculation ################
+    # def compute_jacobian(self, data, use_fixed_model=True, use_model_jm=False, random_normal_mat=None):
+    # 
+    #     inputs = Variable(data, requires_grad=True)
+    # 
+    #     if not use_model_jm:
+    #         if use_fixed_model:
+    #             output = self.model_fixed(inputs)
+    #         else:
+    #             output = self.model(inputs)
+    #     else:
+    #         if use_fixed_model:
+    #             output = self.model_fixed_jm.forward(inputs)
+    #         else:
+    #             output = self.model_jm(inputs)
+    # 
+    #     output_projection = matmul(random_normal_mat, output)
+    # 
+    #     grad_output = torch.zeros(*output_projection.size())
+    #     if inputs.is_cuda:
+    #         grad_output = grad_output.cuda()
+    # 
+    #     num_classes = output_projection.size()[1]
+    # 
+    #     jacobian_list = []
+    #     # grad_output = torch.zeros(*output.size())
+    #     #
+    #     # if inputs.is_cuda:
+    #     #     grad_output = grad_output.cuda()
+    # 
+    #     for i in range(num_classes):
+    #     #for i in self.older_classes:
+    #         zero_gradients(inputs)
+    # 
+    #         grad_output_curr = grad_output.clone()
+    #         grad_output_curr[:, i] = 1
+    #         jacobian_list.append(torch.autograd.grad(outputs=output_projection,
+    #                                                  inputs=inputs,
+    #                                                  grad_outputs=grad_output_curr,
+    #                                                  only_inputs=True,
+    #                                                  retain_graph=True,
+    #                                                  create_graph=not use_fixed_model)[0])
+    # 
+    #     jacobian = torch.stack(jacobian_list, dim=0)
+    # 
+    #     return jacobian
 
     ################ Function for Norm Jacobian calculation ################
-    def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False,
-                                    is_norm=True, is_calc_from_embedded=True):
+    def compute_jacobian(self, data, use_fixed_model=True, use_model_jm=False,
+                         is_norm=True, is_calc_from_outputs=False, random_normal_mat=None):
 
-        if is_calc_from_embedded:
-            jacobian = self.compute_jacobian_from_embedded(data, use_fixed_model, use_model_jm)
-            jacobian_dim = self.projection_dim
+        if is_calc_from_outputs:
+            jacobian = self.compute_jacobian_from_outputs(data, use_fixed_model, use_model_jm)
+            if self.args.no_projection:
+                jacobian_dim = len(self.older_classes)
+            else:
+                jacobian_dim = self.projection_dim
 
         else:
-            jacobian = self.compute_jacobian(data, use_fixed_model, use_model_jm)
-            jacobian_dim = len(self.older_classes)
+            jacobian = self.compute_jacobian_from_embedded(data, use_fixed_model, use_model_jm, random_normal_mat)
+            if self.args.no_projection:
+                jacobian_dim = 64
+            else:
+                jacobian_dim = self.projection_dim
 
         if is_norm:
-            a = jacobian.detach()
-            a = a.view(jacobian_dim, self.args.batch_size, -1)
-            b = torch.norm(a, dim=(0, 2))
+            a = jacobian
+            a = a.permute(1, 0, 2, 3, 4)
+            a = a.contiguous().view(self.args.batch_size, -1)
+            b = torch.norm(a, dim=1)
             b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
             jacobian_norm = jacobian.div(b.expand_as(jacobian))
 
@@ -271,17 +341,29 @@ class Trainer(GenericTrainer):
         return output
 
     ################ Function for Jacobian calculation ################
-    def compute_jacobian(self, data, use_fixed_model=True, use_model_jm=False):
+    def compute_jacobian_from_outputs(self, data, use_fixed_model=True, use_model_jm=False, random_normal_mat=None):
 
         inputs = Variable(data, requires_grad=True)
         output = self.get_model_outputs(self, inputs, use_model_jm, use_fixed_model)
-        grad_output = torch.zeros(*output.size())
 
+        if self.args.no_projection:
+            output_projection = output
+        else:
+            output_projection = matmul(random_normal_mat, output)
+
+        grad_output = torch.zeros(*output_projection.size())
         if inputs.is_cuda:
             grad_output = grad_output.cuda()
 
-        jacobian_list = [self.calc_jacobian_loop(inputs, grad_output.clone(), output, use_fixed_model, i)
-                         for i in range(output.size()[0])]
+        jacobian_list = [self.calc_jacobian_loop(inputs, grad_output.clone(), output_projection, use_fixed_model, i)
+                         for i in range(output_projection.size()[0])]
+
+        # grad_output = torch.zeros(*output.size())
+        # if inputs.is_cuda:
+        #     grad_output = grad_output.cuda()
+        #
+        # jacobian_list = [self.calc_jacobian_loop(inputs, grad_output.clone(), output, use_fixed_model, i)
+        #                  for i in range(output.size()[0])]
 
         # for i in self.older_classes:
         #     zero_gradients(inputs)
@@ -299,7 +381,6 @@ class Trainer(GenericTrainer):
 
         return jacobian
 
-
     def calc_jacobian_loop(self, inputs, grad_output, output, use_fixed_model, i):
         zero_gradients(inputs)
 
@@ -315,35 +396,47 @@ class Trainer(GenericTrainer):
 
         if not use_model_jm:
             if use_fixed_model:
-                output, embedded = self.model_fixed.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2, x3 = self.model_fixed.forward(inputs, embedding_space=True)
             else:
-                output, embedded = self.model.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2, x3 = self.model.forward(inputs, embedding_space=True)
         else:
             if use_fixed_model:
-                output, embedded = self.model_fixed_jm.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2, x3 = self.model_fixed_jm.forward(inputs, embedding_space=True)
             else:
-                output, embedded = self.model_jm.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2, x3 = self.model_jm.forward(inputs, embedding_space=True)
 
-        return output, embedded
+        return output, embedded, x1, x2, x3
 
     ################ Function for Jacobian calculation ################
-    def compute_jacobian_from_embedded(self, data, use_fixed_model=True, use_model_jm=False):
+    def compute_jacobian_from_embedded(self, data, use_fixed_model=True, use_model_jm=False, random_normal_mat=None):
 
         inputs = Variable(data, requires_grad=True)
-        output, embedded = self.get_model_outputs_and_embedded_space(inputs, use_model_jm, use_fixed_model)
+        output, embedded, x1, x2, x3 = self.get_model_outputs_and_embedded_space(inputs, use_model_jm, use_fixed_model)
 
-        random_normal_mat = torch.randn(embedded.size()[0], self.projection_dim, embedded.size()[-1])
-        if self.args.cuda:
-            random_normal_mat = random_normal_mat.cuda()
-
-        embedded_projection = matmul(random_normal_mat, embedded)
+        if self.args.no_projection:
+            embedded_projection = embedded
+        else:
+            embedded_projection = matmul(random_normal_mat[0], embedded)
+            x1_ = matmul(random_normal_mat[1], x1.view(x1.shape[0], x1.shape[1]*x1.shape[2]*x1.shape[3]))
+            x2_ = matmul(random_normal_mat[2], x2.view(x2.shape[0], x2.shape[1]*x2.shape[2]*x2.shape[3]))
+            x3_ = matmul(random_normal_mat[3], x3.view(x3.shape[0], x3.shape[1]*x3.shape[2]*x3.shape[3]))
 
         grad_output = torch.zeros(*embedded_projection.size())
+        grad_output_x = torch.zeros(*x1_.size())
         if inputs.is_cuda:
-            grad_output = grad_output.cuda()
+            grad_output, grad_output_x = grad_output.cuda(), grad_output_x.cuda()
 
-        jacobian_list = [self.calc_jacobian_loop(inputs, grad_output.clone(), embedded_projection, use_fixed_model, i)
+        jacobian_list_embedded = [self.calc_jacobian_loop(inputs, grad_output.clone(), embedded_projection, use_fixed_model, i)
                          for i in range(embedded_projection.size()[0])]
+
+        jacobian_list_x1 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x1_, use_fixed_model, i)
+                         for i in range(x1_.size()[0])]
+
+        jacobian_list_x2 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x2_, use_fixed_model, i)
+                         for i in range(x2_.size()[0])]
+
+        jacobian_list_x3 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x3_, use_fixed_model, i)
+                         for i in range(x3_.size()[0])]
 
         # for i in range(embedded_projection.size()[0]):
         #     zero_gradients(inputs)
@@ -357,7 +450,7 @@ class Trainer(GenericTrainer):
         #                                              retain_graph=True,
         #                                              create_graph=not use_fixed_model)[0])
 
-        jacobian = torch.stack(jacobian_list, dim=0)
+        jacobian = torch.stack(jacobian_list_embedded, dim=0)
 
         return jacobian
 
@@ -394,7 +487,24 @@ class Trainer(GenericTrainer):
 
         logger.info("Epoch %d", epoch)
 
-        self.cancel_batch_norm_for_increments()
+        # random_normal_mat = torch.randn(self.args.batch_size, self.projection_dim, self.train_loader.labels.shape[-1])
+        embedded_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 64) #TODO: Change to embedded space dim if needed
+        x1_random_mat = torch.randn(self.args.batch_size, 2, 16*32*32)
+        x2_random_mat = torch.randn(self.args.batch_size, 2, 32*16*16)
+        x3_random_mat = torch.randn(self.args.batch_size, 2, 64*8*8)
+
+        if self.args.cuda:
+            embedded_random_mat, x1_random_mat, x2_random_mat, x3_random_mat = \
+                embedded_random_mat.cuda(), x1_random_mat.cuda(), x2_random_mat.cuda(), x3_random_mat.cuda()
+
+        random_mats = [embedded_random_mat, x1_random_mat, x2_random_mat, x3_random_mat]
+
+        number_of_iterations = 0
+        total_loss = 0
+        total_classification_loss_jm = 0
+        total_loss2 = 0
+        total_jacobian_matching_loss = 0
+        total_activation_match_loss = 0
 
         for data, y, target in tqdm(self.train_data_iterator):
 
@@ -418,7 +528,6 @@ class Trainer(GenericTrainer):
 
             old_classes_indices = torch.squeeze(torch.nonzero((oldClassesIndices > 0)).long())
             new_classes_indices = torch.squeeze(torch.nonzero((oldClassesIndices == 0)).long())
-
 
             self.optimizer.zero_grad()
             if use_model_jm:
@@ -446,7 +555,7 @@ class Trainer(GenericTrainer):
             loss = F.kl_div(output, Variable(y_onehot))
 
             if use_model_jm:
-                output_jm = self.model_jm(Variable(data))
+                output_jm = self.model_jm(Variable(data_normal_loss))
                 classification_loss_jm = F.kl_div(output_jm, Variable(y_onehot))
 
             myT = self.args.T
@@ -463,7 +572,6 @@ class Trainer(GenericTrainer):
                 else:
                     output2 = output
 
-
                 self.dynamic_threshold += (np.sum(pred2.cpu().numpy(), 0)) * (
                         myT * myT) * self.args.alpha
                 loss2 = F.kl_div(output2, Variable(pred2))
@@ -471,19 +579,38 @@ class Trainer(GenericTrainer):
                 loss2.backward(retain_graph=True)
 
                 if use_model_jm:
-                    #TODO: Change cpu threshold for jacobian_matching_loss (Einav)
-                    jacobian = self.compute_normalized_jacobian(data, use_fixed_model=False,
-                                                                use_model_jm=use_model_jm,
-                                                                is_norm=self.args.norm_jacobian,
-                                                                is_calc_from_embedded=True)
+                    # # Get softened labels of the model from a previous version of the model.
+                    # pred2 = self.model_fixed_jm(Variable(data_distillation_loss), T=myT, labels=True).data
+                    # # Softened output of the model
+                    # if myT > 1:
+                    #     output2 = self.model_jm(Variable(data_distillation_loss), T=myT)
+                    # else:
+                    #     output2 = output_jm
+                    #
+                    # loss3 = F.kl_div(output2, Variable(pred2))
+                    #
+                    # loss3.backward(retain_graph=True)
 
-                    jacobian_model_fixed = self.compute_normalized_jacobian(data, use_fixed_model=True,
-                                                                            use_model_jm=use_model_jm,
-                                                                            is_norm=self.args.norm_jacobian,
-                                                                            is_calc_from_embedded=True)
+                    # #TODO: Change cpu threshold for jacobian_matching_loss (Einav)
+                    jacobian = self.compute_jacobian(data, use_fixed_model=False,
+                                                     use_model_jm=use_model_jm,
+                                                     is_norm=self.args.norm_jacobian,
+                                                     is_calc_from_outputs=self.args.project_outputs,
+                                                     random_normal_mat=random_mats)
 
-                    jacobian_matching_loss = -self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
+                    jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True,
+                                                                 use_model_jm=use_model_jm,
+                                                                 is_norm=self.args.norm_jacobian,
+                                                                 is_calc_from_outputs=self.args.project_outputs,
+                                                                 random_normal_mat=random_mats)
+
+                    jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
                     jacobian_matching_loss.backward(retain_graph=True)
+
+                    _, embedded, x1, x2, x3 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=True)
+                    _, embedded_model_fixed, x1, x2, x3 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=False)
+                    activation_matching_loss = self.args.activation_decay*torch.norm(embedded - embedded_model_fixed)
+                    activation_matching_loss.backward(retain_graph=True)
 
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
@@ -492,10 +619,11 @@ class Trainer(GenericTrainer):
                         param.grad = param.grad * (myT * myT) * self.args.alpha
 
             if len(self.older_classes) == 0 or not self.args.no_nl:
-                loss.backward()
-
+                if not self.args.no_jm_classification or len(self.older_classes) == 0:
+                    loss.backward()
                 if use_model_jm:
-                    classification_loss_jm.backward()
+                    if not self.args.no_jm_classification or len(self.older_classes) == 0:
+                        classification_loss_jm.backward()
 
             for param in self.model.named_parameters():
                 if "fc.weight" in param[0]:
@@ -504,6 +632,21 @@ class Trainer(GenericTrainer):
             self.optimizer.step()
             if use_model_jm:
                 self.optimizer_jm.step()
+
+            number_of_iterations += 1
+            total_loss += loss.detach()
+            total_classification_loss_jm += classification_loss_jm.detach()
+            if not self.args.no_distill and len(self.older_classes) > 0:
+                total_loss2 += loss2.detach()
+                total_jacobian_matching_loss += jacobian_matching_loss.detach()
+                total_activation_match_loss += activation_matching_loss.detach()
+
+        total_loss = total_loss/number_of_iterations
+        total_classification_loss_jm = total_classification_loss_jm/number_of_iterations
+        if not self.args.no_distill and len(self.older_classes) > 0:
+            total_loss2 = total_loss2/number_of_iterations
+            total_jacobian_matching_loss = total_jacobian_matching_loss/number_of_iterations
+            total_activation_match_loss = total_activation_match_loss/number_of_iterations
 
         if 0 == epoch:
             bin_count_norm = bin_count.float() / bin_count.float().sum()
@@ -527,16 +670,17 @@ class Trainer(GenericTrainer):
                 self.older_classes) + self.args.step_size: len(self.gradient_threshold_unreported_experiment)] = np.max(
                 self.gradient_threshold_unreported_experiment)
 
-        if logger is not None and epoch % 5 == (5 - 1):
+        if logger is not None and epoch % 1 == (1 - 1):
             logger.debug("*********CURRENT EPOCH********** : %d", epoch)
-            logger.debug("Classification Loss: %0.4f", loss)
+            logger.debug("Classification Loss: %0.5f", total_loss)
             if use_model_jm:
-                logger.debug("Classification Loss JM: %0.4f", classification_loss_jm)
+                logger.debug("Classification Loss JM: %0.5f", total_classification_loss_jm)
 
             if not self.args.no_distill and len(self.older_classes) > 0:
-                logger.debug("Distillation Loss: %0.4f", loss2)
+                logger.debug("Distillation Loss: %0.5f", total_loss2)
                 if use_model_jm:
-                    logger.debug("Jacobian Matching Loss: %0.8f", jacobian_matching_loss)
+                    logger.debug("Jacobian Matching Loss: %0.5f", total_jacobian_matching_loss)
+                    logger.debug("Activation Matching Loss: %0.5f", total_activation_match_loss)
 
     def add_model(self):
         model = copy.deepcopy(self.model_single)
