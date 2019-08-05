@@ -26,6 +26,7 @@ import time
 
 logger = logging.getLogger('iCARL')
 
+USE_JACOBIAN_APPROX = True
 
 class GenericTrainer:
     '''
@@ -301,29 +302,36 @@ class Trainer(GenericTrainer):
 
         if is_calc_from_outputs:
             jacobian = self.compute_jacobian_from_outputs(data, use_fixed_model, use_model_jm)
-            if self.args.no_projection:
-                jacobian_dim = len(self.older_classes)
-            else:
-                jacobian_dim = self.projection_dim
 
         else:
             jacobian = self.compute_jacobian_from_embedded(data, use_fixed_model, use_model_jm, random_normal_mat)
-            if self.args.no_projection:
-                jacobian_dim = 64
-            else:
-                jacobian_dim = self.projection_dim
 
         if is_norm:
-            a = jacobian
-            a = a.permute(1, 0, 2, 3, 4)
-            a = a.contiguous().view(self.args.batch_size, -1)
-            b = torch.norm(a, dim=1)
-            b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
-            jacobian_norm = jacobian.div(b.expand_as(jacobian))
+            # a = jacobian
+            # a = a.permute(1, 0, 2, 3, 4)
+            # a = a.contiguous().view(self.args.batch_size, -1)
+            # b = torch.norm(a, dim=1)
+            # b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+            # jacobian_norm = jacobian.div(b.expand_as(jacobian))
+
+            jacobian_norm = []
+
+            for jacobian_x_i in jacobian:
+                a = jacobian_x_i
+                if not USE_JACOBIAN_APPROX:
+                    a = a.permute(1, 0, 2, 3, 4)
+                a = a.contiguous().view(self.args.batch_size, -1)
+                b = torch.norm(a, dim=1)
+                if not USE_JACOBIAN_APPROX:
+                    b = b.unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+                else:
+                    b = b.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+                jacobian_norm.append(jacobian_x_i.div(b.expand_as(jacobian_x_i)))
 
             return jacobian_norm
 
         else:
+
             return jacobian
 
     def get_model_outputs(self, inputs, use_model_jm, use_fixed_model):
@@ -381,6 +389,25 @@ class Trainer(GenericTrainer):
 
         return jacobian
 
+    def calc_approx_of_jacobina(self, inputs, grad_output, output, use_fixed_model):
+        zero_gradients(inputs)
+
+        output_col = output.view(output.shape[0], -1)
+        grad_output_col = grad_output.view(grad_output.shape[0], -1)
+        values, indices = output_col.max(dim=1)
+
+        for i in range(0, self.args.batch_size):
+            grad_output_col[i, indices[i]] = 1
+
+        grad_output = grad_output_col.view(grad_output.shape)
+
+        return torch.autograd.grad(outputs=output,
+                                   inputs=inputs,
+                                   grad_outputs=grad_output,
+                                   only_inputs=True,
+                                   retain_graph=True,
+                                   create_graph=not use_fixed_model)[0]
+
     def calc_jacobian_loop(self, inputs, grad_output, output, use_fixed_model, i):
         zero_gradients(inputs)
 
@@ -396,61 +423,64 @@ class Trainer(GenericTrainer):
 
         if not use_model_jm:
             if use_fixed_model:
-                output, embedded, x1, x2, x3 = self.model_fixed.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2 = self.model_fixed.forward(inputs, embedding_space=True)
             else:
-                output, embedded, x1, x2, x3 = self.model.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2 = self.model.forward(inputs, embedding_space=True)
         else:
             if use_fixed_model:
-                output, embedded, x1, x2, x3 = self.model_fixed_jm.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2 = self.model_fixed_jm.forward(inputs, embedding_space=True)
             else:
-                output, embedded, x1, x2, x3 = self.model_jm.forward(inputs, embedding_space=True)
+                output, embedded, x1, x2 = self.model_jm.forward(inputs, embedding_space=True)
 
-        return output, embedded, x1, x2, x3
+        return output, embedded, x1, x2
 
     ################ Function for Jacobian calculation ################
     def compute_jacobian_from_embedded(self, data, use_fixed_model=True, use_model_jm=False, random_normal_mat=None):
 
-        inputs = Variable(data, requires_grad=True)
-        output, embedded, x1, x2, x3 = self.get_model_outputs_and_embedded_space(inputs, use_model_jm, use_fixed_model)
+        # inputs = Variable(data, requires_grad=True)
+        inputs_x1 = Variable(data, requires_grad=True)
+        inputs_x2 = Variable(data, requires_grad=True)
+        # inputs_x3 = Variable(inputs, requires_grad=True)
 
-        if self.args.no_projection:
-            embedded_projection = embedded
+        # _, embedded, _, _ = self.get_model_outputs_and_embedded_space(inputs, use_model_jm, use_fixed_model)
+        _, _, x1, _ = self.get_model_outputs_and_embedded_space(inputs_x1, use_model_jm, use_fixed_model)
+        _, _, _, x2 = self.get_model_outputs_and_embedded_space(inputs_x2, use_model_jm, use_fixed_model)
+        # _, _, _, _, x3 = self.get_model_outputs_and_embedded_space(inputs_x3, use_model_jm, use_fixed_model)
+
+        if USE_JACOBIAN_APPROX:
+            grad_output_x = torch.zeros(*x1.size())
+            if data.is_cuda:
+                grad_output_x = grad_output_x.cuda()
+
+            jacobian_x1 = self.calc_approx_of_jacobina(inputs_x1, grad_output_x.clone(), x1, use_fixed_model)
+            jacobian_x2 = self.calc_approx_of_jacobina(inputs_x2, grad_output_x.clone(), x2, use_fixed_model)
+            jacobian = [jacobian_x1, jacobian_x2]
+
         else:
-            embedded_projection = matmul(random_normal_mat[0], embedded)
+            # embedded_projection = matmul(random_normal_mat[0], embedded)
             x1_ = matmul(random_normal_mat[1], x1.view(x1.shape[0], x1.shape[1]*x1.shape[2]*x1.shape[3]))
             x2_ = matmul(random_normal_mat[2], x2.view(x2.shape[0], x2.shape[1]*x2.shape[2]*x2.shape[3]))
-            x3_ = matmul(random_normal_mat[3], x3.view(x3.shape[0], x3.shape[1]*x3.shape[2]*x3.shape[3]))
+            # x3_ = matmul(random_normal_mat[3], x3.view(x3.shape[0], x3.shape[1]*x3.shape[2]*x3.shape[3]))
 
-        grad_output = torch.zeros(*embedded_projection.size())
-        grad_output_x = torch.zeros(*x1_.size())
-        if inputs.is_cuda:
-            grad_output, grad_output_x = grad_output.cuda(), grad_output_x.cuda()
+            # grad_output = torch.zeros(*embedded_projection.size())
+            grad_output_x = torch.zeros(*x1_.size())
+            if data.is_cuda:
+                # grad_output, grad_output_x = grad_output.cuda(), grad_output_x.cuda()
+                grad_output_x = grad_output_x.cuda()
 
-        jacobian_list_embedded = [self.calc_jacobian_loop(inputs, grad_output.clone(), embedded_projection, use_fixed_model, i)
-                         for i in range(embedded_projection.size()[0])]
+            # jacobian_list_embedded = [self.calc_jacobian_loop(inputs, grad_output.clone(), embedded_projection, use_fixed_model, i)
+            #                           for i in range(embedded_projection.size()[0])]
+            jacobian_list_x1 = [self.calc_jacobian_loop(inputs_x1, grad_output_x.clone(), x1_, use_fixed_model, i)
+                                for i in range(x1_.size()[0])]
+            jacobian_list_x2 = [self.calc_jacobian_loop(inputs_x2, grad_output_x.clone(), x2_, use_fixed_model, i)
+                                for i in range(x2_.size()[0])]
+            # jacobian_list_x3 = [self.calc_jacobian_loop(inputs_x3, grad_output_x.clone(), x3_, use_fixed_model, i)
+            #                     for i in range(x3_.size()[0])]
 
-        jacobian_list_x1 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x1_, use_fixed_model, i)
-                         for i in range(x1_.size()[0])]
-
-        jacobian_list_x2 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x2_, use_fixed_model, i)
-                         for i in range(x2_.size()[0])]
-
-        jacobian_list_x3 = [self.calc_jacobian_loop(inputs, grad_output_x.clone(), x3_, use_fixed_model, i)
-                         for i in range(x3_.size()[0])]
-
-        # for i in range(embedded_projection.size()[0]):
-        #     zero_gradients(inputs)
-        #
-        #     grad_output_curr = grad_output.clone()
-        #     grad_output_curr[i, :] = 1
-        #     jacobian_list.append(torch.autograd.grad(outputs=embedded_projection,
-        #                                              inputs=inputs,
-        #                                              grad_outputs=grad_output_curr,
-        #                                              only_inputs=True,
-        #                                              retain_graph=True,
-        #                                              create_graph=not use_fixed_model)[0])
-
-        jacobian = torch.stack(jacobian_list_embedded, dim=0)
+            # jacobian = torch.stack(jacobian_list_embedded, dim=0)
+            jacobian = [torch.stack(jacobian_list_x1, dim=0),
+                          torch.stack(jacobian_list_x2, dim=0)]
+                          # torch.stack(jacobian_list_x3, dim=0)]
 
         return jacobian
 
@@ -479,6 +509,19 @@ class Trainer(GenericTrainer):
                         # m.weight.requires_grad = False
                         # m.bias.requires_grad = False
 
+    def get_norm_attention(self, z):
+
+        attention = torch.sum(torch.abs(z) ** 2, dim=1)
+
+        a = attention
+        a = torch.norm(a, dim=(1, 2)).unsqueeze(1).unsqueeze(2)
+        norm_attention = attention.div(a.expand_as(attention))
+        return norm_attention
+
+    def norm_embedded(self, embedded):
+        norm_embedded = embedded / torch.norm(embedded, 2, 1).unsqueeze(1)
+        return norm_embedded
+
     def train(self, epoch, use_model_jm=False):
 
         self.model.train()
@@ -487,24 +530,32 @@ class Trainer(GenericTrainer):
 
         logger.info("Epoch %d", epoch)
 
-        # random_normal_mat = torch.randn(self.args.batch_size, self.projection_dim, self.train_loader.labels.shape[-1])
-        embedded_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 64) #TODO: Change to embedded space dim if needed
-        x1_random_mat = torch.randn(self.args.batch_size, 2, 16*32*32)
-        x2_random_mat = torch.randn(self.args.batch_size, 2, 32*16*16)
-        x3_random_mat = torch.randn(self.args.batch_size, 2, 64*8*8)
+        # # random_normal_mat = torch.randn(self.args.batch_size, self.projection_dim, self.train_loader.labels.shape[-1])
+        if 'resnet' in self.args.model_type:
+            embedded_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 64)  # TODO: Change to dim according to model
+            x1_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 16*32*32)  # TODO: Change to dim according to model
+            x2_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 16*32*32)  # TODO: Change to dim according to model
+
+        elif 'test' in self.args.model_type:
+            embedded_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 48)  # TODO: Change to dim according to model
+            x1_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 6 * 16 * 16)
+            x2_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 10 * 4 * 4)
+        # x2_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 32*16*16)
+        # x3_random_mat = torch.randn(self.args.batch_size, self.projection_dim, 64*8*8)
 
         if self.args.cuda:
-            embedded_random_mat, x1_random_mat, x2_random_mat, x3_random_mat = \
-                embedded_random_mat.cuda(), x1_random_mat.cuda(), x2_random_mat.cuda(), x3_random_mat.cuda()
+            embedded_random_mat, x1_random_mat, x2_random_mat = \
+                embedded_random_mat.cuda(), x1_random_mat.cuda(), x2_random_mat.cuda()  # x3_random_mat.cuda()
 
-        random_mats = [embedded_random_mat, x1_random_mat, x2_random_mat, x3_random_mat]
+        random_mats = [embedded_random_mat, x1_random_mat, x2_random_mat]  # x3_random_mat]
 
         number_of_iterations = 0
         total_loss = 0
         total_classification_loss_jm = 0
         total_loss2 = 0
-        total_jacobian_matching_loss = 0
-        total_activation_match_loss = 0
+        total_activation_matching_loss = 0
+        total_internal_jm_loss = 0
+        total_jm_dist_loss = 0
 
         for data, y, target in tqdm(self.train_data_iterator):
 
@@ -517,7 +568,7 @@ class Trainer(GenericTrainer):
                 except NameError:
                     bin_count = target.bincount()
                 except:
-                    print('Couldn''t increase bin_count')
+                    print('exception on bincount calc')
 
             if self.args.cuda:
                 data, target, y = data.cuda(), target.cuda(), y.cuda()
@@ -578,39 +629,65 @@ class Trainer(GenericTrainer):
 
                 loss2.backward(retain_graph=True)
 
-                if use_model_jm:
-                    # # Get softened labels of the model from a previous version of the model.
-                    # pred2 = self.model_fixed_jm(Variable(data_distillation_loss), T=myT, labels=True).data
-                    # # Softened output of the model
-                    # if myT > 1:
-                    #     output2 = self.model_jm(Variable(data_distillation_loss), T=myT)
-                    # else:
-                    #     output2 = output_jm
-                    #
-                    # loss3 = F.kl_div(output2, Variable(pred2))
-                    #
-                    # loss3.backward(retain_graph=True)
+                if use_model_jm and self.args.use_distillation:
+                    # Get softened labels of the model from a previous version of the model.
+                    pred2 = self.model_fixed_jm(Variable(data_distillation_loss), T=myT, labels=True).data
+                    # Softened output of the model
+                    if myT > 1:
+                        output2 = self.model_jm(Variable(data_distillation_loss), T=myT)
+                    else:
+                        output2 = output_jm
+
+                    loss3 = F.kl_div(output2, Variable(pred2))
+
+                    loss3.backward(retain_graph=True)
+
+                if use_model_jm and (not self.args.no_jm_loss):
 
                     # #TODO: Change cpu threshold for jacobian_matching_loss (Einav)
                     jacobian = self.compute_jacobian(data, use_fixed_model=False,
-                                                     use_model_jm=use_model_jm,
-                                                     is_norm=self.args.norm_jacobian,
-                                                     is_calc_from_outputs=self.args.project_outputs,
-                                                     random_normal_mat=random_mats)
-
-                    jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True,
                                                                  use_model_jm=use_model_jm,
                                                                  is_norm=self.args.norm_jacobian,
                                                                  is_calc_from_outputs=self.args.project_outputs,
                                                                  random_normal_mat=random_mats)
 
-                    jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
-                    jacobian_matching_loss.backward(retain_graph=True)
+                    jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True,
+                                                                                   use_model_jm=use_model_jm,
+                                                                                   is_norm=self.args.norm_jacobian,
+                                                                                   is_calc_from_outputs=self.args.project_outputs,
+                                                                                   random_normal_mat=random_mats)
 
-                    _, embedded, x1, x2, x3 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=True)
-                    _, embedded_model_fixed, x1, x2, x3 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=False)
-                    activation_matching_loss = self.args.activation_decay*torch.norm(embedded - embedded_model_fixed)
+                    # jacobian_matching_loss = self.decay_jm*torch.norm(jacobian - jacobian_model_fixed)
+                    # jacobian_matching_loss.backward(retain_graph=True)
+
+                    jacobian_matching_x_loss = 0
+                    num_of_jacobians = 0
+                    for jacobian_item, jacobian_fixed_item in zip(jacobian, jacobian_model_fixed):
+                        jacobian_matching_x_loss += self.decay_jm*torch.norm(jacobian_item - jacobian_fixed_item)
+                        num_of_jacobians += 1
+
+                    jacobian_matching_x_loss = jacobian_matching_x_loss / num_of_jacobians
+                    jacobian_matching_x_loss.backward(retain_graph=True)
+                    # print(jacobian_matching_x_loss)
+
+                if self.args.use_activation_matching:
+                    _, embedded, x1, x2 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=True)
+                    _, embedded_model_fixed, x1_fixed, x2_fixed = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=False)
+
+                    norm_embedded = self.norm_embedded(embedded)
+                    norm_embedded_fixed = self.norm_embedded(embedded_model_fixed)
+
+                    # norm_x1 = self.get_norm_attention(x1)
+                    # norm_x1_fixed = self.get_norm_attention(x1_fixed)
+                    # norm_x2 = self.get_norm_attention(x2)
+                    # norm_x2_fixes = self.get_norm_attention(x2_fixed)
+
+                    activation_matching_loss = self.args.activation_decay * torch.norm(norm_embedded - norm_embedded_fixed)
+                    # activation_matching_loss += self.args.activation_decay * torch.norm(norm_x1 - norm_x1_fixed)
+                    # activation_matching_loss += self.args.activation_decay * torch.norm(norm_x2 - norm_x2_fixes)
                     activation_matching_loss.backward(retain_graph=True)
+                    # print('\n')
+                    # print(activation_matching_loss)
 
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
@@ -638,15 +715,23 @@ class Trainer(GenericTrainer):
             total_classification_loss_jm += classification_loss_jm.detach()
             if not self.args.no_distill and len(self.older_classes) > 0:
                 total_loss2 += loss2.detach()
-                total_jacobian_matching_loss += jacobian_matching_loss.detach()
-                total_activation_match_loss += activation_matching_loss.detach()
+                if use_model_jm and (not self.args.no_jm_loss):
+                    total_internal_jm_loss += jacobian_matching_x_loss.detach()
+                if use_model_jm and self.args.use_activation_matching:
+                    total_activation_matching_loss += activation_matching_loss.detach()
+                if use_model_jm and self.args.use_distillation:
+                    total_jm_dist_loss += loss3.detach()
 
         total_loss = total_loss/number_of_iterations
         total_classification_loss_jm = total_classification_loss_jm/number_of_iterations
         if not self.args.no_distill and len(self.older_classes) > 0:
             total_loss2 = total_loss2/number_of_iterations
-            total_jacobian_matching_loss = total_jacobian_matching_loss/number_of_iterations
-            total_activation_match_loss = total_activation_match_loss/number_of_iterations
+            if use_model_jm and (not self.args.no_jm_loss):
+                total_internal_jm_loss = total_internal_jm_loss/number_of_iterations
+            if use_model_jm and self.args.use_activation_matching:
+                total_activation_matching_loss = total_activation_matching_loss / number_of_iterations
+            if use_model_jm and self.args.use_distillation:
+                total_jm_dist_loss = total_jm_dist_loss / number_of_iterations
 
         if 0 == epoch:
             bin_count_norm = bin_count.float() / bin_count.float().sum()
@@ -678,9 +763,12 @@ class Trainer(GenericTrainer):
 
             if not self.args.no_distill and len(self.older_classes) > 0:
                 logger.debug("Distillation Loss: %0.5f", total_loss2)
-                if use_model_jm:
-                    logger.debug("Jacobian Matching Loss: %0.5f", total_jacobian_matching_loss)
-                    logger.debug("Activation Matching Loss: %0.5f", total_activation_match_loss)
+                if use_model_jm and (not self.args.no_jm_loss):
+                    logger.debug("Jacobian Matching Internal Layers Loss: %0.5f", total_internal_jm_loss)
+                if use_model_jm and self.args.use_activation_matching:
+                    logger.debug("Activation Matching Loss: %0.5f", total_activation_matching_loss)
+                if use_model_jm and self.args.use_distillation:
+                    logger.debug("JM Distillation Loss: %0.5f", total_jm_dist_loss)
 
     def add_model(self):
         model = copy.deepcopy(self.model_single)

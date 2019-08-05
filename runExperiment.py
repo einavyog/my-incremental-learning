@@ -95,13 +95,17 @@ parser.add_argument('--pretrained_model', default=None,
                     help='Path to model weights')
 parser.add_argument('--pretrained_model_jm', default=None,
                     help='Path to model weights for jacobian matching model')
-parser.add_argument('--jm_decay', type=float, default=0.0001, help='Jacobian Matching decay (L2 penalty).')
+parser.add_argument('--jm_decay', type=float, default=0.001, help='Jacobian Matching decay (L2 penalty).')
 parser.add_argument('--activation_decay', type=float, default=0.0005, help='Jacobian Matching decay (L2 penalty).')
 parser.add_argument('--norm_jacobian', action='store_true', default=False,
                     help='Use normed Jacobian for Jacobiam matchon. Relevanty only when using --jacobian_matching')
 parser.add_argument('--jacobian_matching', action='store_true', default=False)
 parser.add_argument('--no_projection', action='store_true', default=False)
 parser.add_argument('--no_jm_classification', action='store_true', default=False)
+parser.add_argument('--no_jm_loss', action='store_true', default=False)
+parser.add_argument('--use_activation_matching', action='store_true', default=False)
+parser.add_argument('--use_distillation', action='store_true', default=False)
+parser.add_argument('--match_one_layer', action='store_true', default=False)
 parser.add_argument('--project_outputs', action='store_true', default=False)
 parser.add_argument('--projection_dim', type=int, default=10,
                     help='The size of the random matrix prior to the Jacobian Matching')
@@ -514,25 +518,25 @@ my_plotter_total.plot(x, train_y_total_jm_avg, title=args.name, legend="Trained 
 my_plotter_total.save_fig(my_experiment.path + "_avg_over_all_seeds",
                           dataset.classes + 1, title='Avg over ' + str(len(args.seeds)) + ' epochs')
 
-import numpy as np
-import pandas as pd
-
-y_total_df = pd.DataFrame(columns=['Number Of Classes', 'Accuracy'])
-a = list(map(list, zip(*y_total)))
-col = 0
-for class_group in range(0, dataset.classes, args.step_size):
-    curr_class = class_group + args.step_size
-    print(curr_class)
-    row = 0
-    for seed in args.seeds:
-        tmp = np.transpose([np.array(y_total)[:, col].astype(int), [curr_class, curr_class]])
-        y_total_df = y_total_df.append(pd.DataFrame(tmp, columns=['Number Of Classes', 'Accuracy']), ignore_index=True)
-        row += 1
-    col += 1
-
-print(y_total_df)
-print(y_total)
-
-y_total_df = y_total_df.astype(int)
-a = sns.lineplot(x='Number Of Classes', y='Accuracy', data=y_total_df, legend='full').get_figure()
-a.savefig(my_experiment.path + "_avg_over_all_seeds.pdf")
+# import numpy as np
+# import pandas as pd
+#
+# y_total_df = pd.DataFrame(columns=['Number Of Classes', 'Accuracy'])
+# a = list(map(list, zip(*y_total)))
+# col = 0
+# for class_group in range(0, dataset.classes, args.step_size):
+#     curr_class = class_group + args.step_size
+#     print(curr_class)
+#     row = 0
+#     for seed in args.seeds:
+#         tmp = np.transpose([np.array(y_total)[:, col].astype(int), [curr_class, curr_class]])
+#         y_total_df = y_total_df.append(pd.DataFrame(tmp, columns=['Number Of Classes', 'Accuracy']), ignore_index=True)
+#         row += 1
+#     col += 1
+#
+# print(y_total_df)
+# print(y_total)
+#
+# y_total_df = y_total_df.astype(int)
+# a = sns.lineplot(x='Number Of Classes', y='Accuracy', data=y_total_df, legend='full').get_figure()
+# a.savefig(my_experiment.path + "_avg_over_all_seeds.pdf")

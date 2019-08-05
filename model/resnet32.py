@@ -74,6 +74,9 @@ class CifarResNet(nn.Module):
         self.bn_1 = nn.BatchNorm2d(16)
 
         self.inplanes = 16
+        self.stage_1_1 = self._make_layer(block, 16, 1, 1)
+        self.stage_1_2 = self._make_layer(block, 16, 2, 1)
+        self.stage_1_3 = self._make_layer(block, 16, layer_blocks-3, 1)
         self.stage_1 = self._make_layer(block, 16, layer_blocks, 1)
         self.stage_2 = self._make_layer(block, 32, layer_blocks, 2)
         self.stage_3 = self._make_layer(block, 64, layer_blocks, 2)
@@ -106,11 +109,14 @@ class CifarResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, feature=False, T=1, labels=False, scale=None, keep=None, embedding_space=False):
+    def forward(self, x, feature=False, T=1, labels=False, scale=None, keep=None, embedding_space=False, internal_layers=False):
 
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
-        x1 = self.stage_1(x)
+        x1_1 = self.stage_1_1(x)
+        x1_2 = self.stage_1_2(x1_1)
+        x1 = self.stage_1_3(x1_2)
+        # x1 = self.stage_1(x)
         x2 = self.stage_2(x1)
         x3 = self.stage_3(x2)
         x = self.avgpool(x3)
@@ -136,29 +142,22 @@ class CifarResNet(nn.Module):
         if embedding_space:
             # return F.log_softmax(x, dim=1), x
             # return F.log_softmax(x, dim=1), embedded
-            norm_embedded = embedded / torch.norm(embedded, 2, 1).unsqueeze(1)
+            # norm_embedded = embedded / torch.norm(embedded, 2, 1).unsqueeze(1)
 
-            a1 = x1
-            # a1 = a1.contiguous().view(x1.shape[0], -1)
-            # a1 = torch.norm(a1, dim=1)
-            # a1 = a1.unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            a1 = torch.norm(torch.norm(a1, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            norm_x1 = x1.div(a1.expand_as(x1))
+            # a1 = x1
+            # a1 = torch.norm(torch.norm(a1, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
+            # norm_x1 = x1.div(a1.expand_as(x1))
 
-            a2 = x2
-            # a2 = a2.contiguous().view(x2.shape[0], -1)
-            # a2 = torch.norm(a2, dim=1)
-            # a2 = a2.unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            a2 = torch.norm(torch.norm(a2, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            norm_x2 = x2.div(a2.expand_as(x2))
+            # a2 = x2
+            # a2 = torch.norm(torch.norm(a2, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
+            # norm_x2 = x2.div(a2.expand_as(x2))
 
-            a3 = x3
-            # a3 = a3.contiguous().view(x3.shape[0], -1)
-            # a3 = torch.norm(a3, dim=1)
-            a3 = torch.norm(torch.norm(a3, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            norm_x3 = x3.div(a3.expand_as(x3))
+            # a3 = x3
+            # a3 = torch.norm(torch.norm(a3, dim=(2, 3)), dim=1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
+            # norm_x3 = x3.div(a3.expand_as(x3))
 
-            return F.log_softmax(x, dim=1), norm_embedded, norm_x1, norm_x2, norm_x3
+            return F.log_softmax(x, dim=1), embedded, x1_1, x1_2
+            # return F.log_softmax(x, dim=1), norm_embedded, norm_x1, norm_x2
 
         return F.log_softmax(x, dim=1)
 
