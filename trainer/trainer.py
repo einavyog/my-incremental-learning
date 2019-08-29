@@ -70,6 +70,9 @@ class GenericTrainer:
         self.seed = args.seed
         self.projection_dim = args.projection_dim
 
+        self.pca = None
+        self.pca_jm = None
+
         logger.warning("Shuffling turned off for debugging")
         # random.seed(args.seed)
         # random.shuffle(self.all_classes)
@@ -232,7 +235,105 @@ class Trainer(GenericTrainer):
 
         self.model_single = myModel
         self.optimizer_single = optimizer
-    # 
+
+    def my_pca(self, data, k=10):
+        # preprocess the data
+        X = torch.from_numpy(data)
+        X_mean = torch.mean(X, 0)
+        X = X - X_mean.expand_as(X)
+
+        # svd
+        U, S, V = torch.svd(torch.t(X))
+        return torch.mm(X, U[:, :k]), U[:,:k]
+
+    def update_pca(self, pca_dim, use_jm):
+        from matplotlib import pyplot as plt
+
+        self.model.eval()
+        if use_jm:
+            self.model_jm.eval()
+
+        total_embedded = []
+        total_embedded_jm = []
+        total_labels = []
+
+        for data, y, target in tqdm(self.train_data_iterator):
+
+            if self.args.batch_size != target.__len__():
+                continue
+
+            if self.args.cuda:
+                data, target, y = data.cuda(), target.cuda(), y.cuda()
+
+            self.optimizer.zero_grad()
+            if use_jm:
+                self.optimizer_jm.zero_grad()
+
+            # Create y_onehot tensor for normal classification_loss
+            y_onehot = torch.FloatTensor(len(target), self.dataset.classes)
+            if self.args.cuda:
+                y_onehot = y_onehot.cuda()
+
+            y_onehot.zero_()
+            target.unsqueeze_(1)
+            y_onehot.scatter_(1, target, 1)
+
+            _, embedded, _, _ = self.model.forward(Variable(data), embedding_space=True)
+            total_embedded.append(embedded.detach())
+
+            if use_jm:
+                _, embedded_jm, _, _ = self.model_jm.forward(Variable(data), embedding_space=True)
+                total_embedded_jm.append(embedded_jm.detach())
+
+            total_labels.append(target)
+
+        all_embedded = torch.cat(total_embedded)
+        embedded_on_pca, self.pca = self.my_pca(all_embedded.cpu().numpy(), k=pca_dim)
+        if self.args.cuda:
+            self.pca = self.pca .cuda()
+
+        all_labels = torch.cat(total_labels)
+
+        if use_jm:
+            all_embedded_jm = torch.cat(total_embedded_jm)
+            embedded_on_pca_jm, self.pca_jm = self.my_pca(all_embedded_jm.cpu().numpy(), k=pca_dim)
+            if self.args.cuda:
+                self.pca_jm = self.pca_jm.cuda()
+
+        plt.figure()
+
+        for i in all_labels.unique():
+            plt.scatter(embedded_on_pca[all_labels.flatten() == i, 0], embedded_on_pca[all_labels.flatten() == i, 1], label=int(i))
+
+        # plt.legend()
+        # plt.title('PCA of IRIS dataset')
+        # plt.show()
+        # plt.savefig('./pca_0_1.png')
+        #
+        # plt.figure()
+        #
+        # for i in all_labels.unique():
+        #     plt.scatter(embedded_on_pca[all_labels.flatten() == i, 2], embedded_on_pca[all_labels.flatten() == i, 3], label=int(i))
+        #
+        # plt.legend()
+        # plt.title('PCA of IRIS dataset')
+        # plt.show()
+        # plt.savefig('./pca_2_3.png')
+        #
+        # plt.figure()
+        #
+        # for i in all_labels.unique():
+        #     plt.scatter(embedded_on_pca[all_labels.flatten() == i, 4], embedded_on_pca[all_labels.flatten() == i, 5], label=int(i))
+        #
+        # plt.legend()
+        # plt.title('PCA of IRIS dataset')
+        # plt.show()
+        # plt.savefig('./pca_4_5.png')
+
+        print('Updated PCA')
+
+
+
     # def compute_normalized_jacobian(self, data, use_fixed_model=True, use_model_jm=False,
     #                                 is_norm=True, is_calc_from_embedded=False, random_normal_mat=None):
     # 
@@ -502,8 +603,7 @@ class Trainer(GenericTrainer):
 
             # if self.args.no_bn and len(self.older_classes) > 1:
             if self.args.no_bn:
-
-                for m in self.model.modules():
+                for m in self.model_jm.modules():
                     if isinstance(m, nn.BatchNorm2d):
                         m.eval()
                         # m.weight.requires_grad = False
@@ -615,6 +715,9 @@ class Trainer(GenericTrainer):
                 pass
 
             elif len(self.older_classes) > 0:
+                # self.cancel_batch_norm_for_increments()
+                old_indices = torch.nonzero(target <= max(self.older_classes)).long()
+
                 # Get softened labels of the model from a previous version of the model.
                 pred2 = self.model_fixed(Variable(data_distillation_loss), T=myT, labels=True).data
                 # Softened output of the model
@@ -631,14 +734,14 @@ class Trainer(GenericTrainer):
 
                 if use_model_jm and self.args.use_distillation:
                     # Get softened labels of the model from a previous version of the model.
-                    pred2 = self.model_fixed_jm(Variable(data_distillation_loss), T=myT, labels=True).data
+                    pred3 = self.model_fixed_jm(Variable(data_distillation_loss), T=myT, labels=True).data
                     # Softened output of the model
                     if myT > 1:
-                        output2 = self.model_jm(Variable(data_distillation_loss), T=myT)
+                        output3 = self.model_jm(Variable(data_distillation_loss), T=myT)
                     else:
-                        output2 = output_jm
+                        output3 = output_jm
 
-                    loss3 = F.kl_div(output2, Variable(pred2))
+                    loss3 = F.kl_div(output3, Variable(pred3))
 
                     loss3.backward(retain_graph=True)
 
@@ -650,6 +753,7 @@ class Trainer(GenericTrainer):
                                                                  is_norm=self.args.norm_jacobian,
                                                                  is_calc_from_outputs=self.args.project_outputs,
                                                                  random_normal_mat=random_mats)
+
 
                     jacobian_model_fixed = self.compute_jacobian(data, use_fixed_model=True,
                                                                                    use_model_jm=use_model_jm,
@@ -663,7 +767,7 @@ class Trainer(GenericTrainer):
                     jacobian_matching_x_loss = 0
                     num_of_jacobians = 0
                     for jacobian_item, jacobian_fixed_item in zip(jacobian, jacobian_model_fixed):
-                        jacobian_matching_x_loss += self.decay_jm*torch.norm(jacobian_item - jacobian_fixed_item)
+                        jacobian_matching_x_loss += self.decay_jm*torch.norm(jacobian_item[old_indices] - jacobian_fixed_item[old_indices])
                         num_of_jacobians += 1
 
                     jacobian_matching_x_loss = jacobian_matching_x_loss / num_of_jacobians
@@ -671,11 +775,21 @@ class Trainer(GenericTrainer):
                     # print(jacobian_matching_x_loss)
 
                 if self.args.use_activation_matching:
-                    _, embedded, x1, x2 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=True)
-                    _, embedded_model_fixed, x1_fixed, x2_fixed = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=False)
 
-                    norm_embedded = self.norm_embedded(embedded)
-                    norm_embedded_fixed = self.norm_embedded(embedded_model_fixed)
+                    _, embedded, x1, x2 = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=False)
+                    _, embedded_model_fixed, x1_fixed, x2_fixed = self.get_model_outputs_and_embedded_space(data, use_model_jm, use_fixed_model=True)
+
+                    if self.args.use_pca:
+                        embedded = torch.mm(embedded, self.pca_jm)
+                        embedded_model_fixed = torch.mm(embedded_model_fixed, self.pca_jm)
+
+                    USE_ONLY_OLD_CLASSES = False
+                    if USE_ONLY_OLD_CLASSES:
+                        norm_embedded = self.norm_embedded(embedded)[old_indices]
+                        norm_embedded_fixed = self.norm_embedded(embedded_model_fixed)[old_indices]
+                    else:
+                        norm_embedded = self.norm_embedded(embedded)
+                        norm_embedded_fixed = self.norm_embedded(embedded_model_fixed)
 
                     # norm_x1 = self.get_norm_attention(x1)
                     # norm_x1_fixed = self.get_norm_attention(x1_fixed)
@@ -688,7 +802,6 @@ class Trainer(GenericTrainer):
                     activation_matching_loss.backward(retain_graph=True)
                     # print('\n')
                     # print(activation_matching_loss)
-
 
                 # Scale gradient by a factor of square of T. See Distilling Knowledge in Neural Networks by Hinton et.al. for details.
                 for param in self.model.parameters():

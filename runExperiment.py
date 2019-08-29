@@ -85,6 +85,7 @@ parser.add_argument('--T', type=float, default=1, help='Tempreture used for soft
 parser.add_argument('--memory-budgets', type=int, nargs='+', default=[2000],
                     help='How many images can we store at max. 0 will result in fine-tuning')
 parser.add_argument('--epochs-class', type=int, default=70, help='Number of epochs for each increment')
+parser.add_argument('--pca_dim', type=int, default=10, help='Number of dimensions in PCA projection')
 parser.add_argument('--dataset', default="CIFAR100", help='Dataset to be used; example CIFAR, MNIST')
 parser.add_argument('--lwf', action='store_true', default=False,
                     help='Use learning without forgetting. Ignores memory-budget '
@@ -104,7 +105,9 @@ parser.add_argument('--no_projection', action='store_true', default=False)
 parser.add_argument('--no_jm_classification', action='store_true', default=False)
 parser.add_argument('--no_jm_loss', action='store_true', default=False)
 parser.add_argument('--use_activation_matching', action='store_true', default=False)
+parser.add_argument('--use_pca', action='store_true', default=False)
 parser.add_argument('--use_distillation', action='store_true', default=False)
+parser.add_argument('--no_bn', action='store_true', default=False)
 parser.add_argument('--match_one_layer', action='store_true', default=False)
 parser.add_argument('--project_outputs', action='store_true', default=False)
 parser.add_argument('--projection_dim', type=int, default=10,
@@ -320,6 +323,9 @@ for seed in args.seeds:
                 # Compute the the nmc based classification results
                 tempTrain = t_classifier.evaluate(my_trainer.model, train_iterator)
                 train_y.append(tempTrain)
+
+                if args.use_pca:
+                    my_trainer.update_pca(args.pca_dim, use_jm=args.jacobian_matching)
 
                 testY1 = nmc.evaluate(my_trainer.model, test_iterator, step_size=args.step_size, kMean=True)
                 testY = nmc.evaluate(my_trainer.model, test_iterator)
